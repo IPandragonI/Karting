@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+@plugin "daisyui" {
+  themes: false;
+}
+
+/* Paddock: sunny trackside palette. Kerb red as the primary action colour, asphalt neutrals,
+   grass green accent. The HUD floats over the 3D view, so surfaces are translucent glass. */
+@plugin "daisyui/theme" {
+  name: "paddock";
+  default: true;
+  color-scheme: dark;
+  --color-base-100: #1f2329;
+  --color-base-200: #181b20;
+  --color-base-300: #2b3038;
+  --color-base-content: #f3f1ea;
+  --color-primary: #e5483b;
+  --color-primary-content: #fff7f2;
+  --color-secondary: #f2c14e;
+  --color-secondary-content: #2a1f05;
+  --color-accent: #7cc35a;
+  --color-accent-content: #10200a;
+  --color-neutral: #2b3038;
+  --color-neutral-content: #e8e6df;
+  --color-info: #79b8e8;
+  --color-info-content: #0b1c2c;
+  --color-success: #7cc35a;
+  --color-success-content: #10200a;
+  --color-warning: #f2c14e;
+  --color-warning-content: #2a1f05;
+  --color-error: #ff6b5e;
+  --color-error-content: #2b0805;
+  --radius-selector: 0.75rem;
+  --radius-field: 0.75rem;
+  --radius-box: 1.25rem;
+  --border: 1px;
+  --depth: 1;
+  --noise: 0;
+}
+
+@theme {
+  --font-sans: var(--font-rubik), ui-sans-serif, system-ui, sans-serif;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+  background: #1f2329;
+}
+
+/* Glass panels over the canvas. */
+.glass-panel {
+  background: color-mix(in oklab, var(--color-base-100) 78%, transparent);
+  backdrop-filter: blur(10px);
+  border: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
+}
+
+.hud-text {
+  text-shadow: 0 2px 6px rgb(0 0 0 / 0.45);
+  font-variant-numeric: tabular-nums;
+}
