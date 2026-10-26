@@ -6,8 +6,11 @@
 // - A cell is CELL × CELL world units; cell (cx, cz) is centred on (cx * CELL, cz * CELL).
 // - Directions: 0 = +Z, 1 = +X, 2 = −Z, 3 = −X. A rotation `rot` turns a piece by rot × 90°
 //   around +Y exactly like `object.rotation.y = rot * π / 2` in three.js, so it adds `rot`
-//   to every direction index.
+//   to every direction index. A flipped piece is mirrored (local x → −x) before rotating.
 // - The local origin is the centre of the piece's anchor cell [0, 0].
+// - Elevation: every piece sits on an integer level (LEVEL_HEIGHT world units each) at its
+//   connector A; ramps climb `rise` levels towards connector B. Heights follow one smooth
+//   profile along the centerline, shared by the road mesh, kerbs, walls and the kart's ground.
 
 export const CELL = 12;
 /** Half width of the asphalt. */
@@ -16,19 +19,28 @@ export const ROAD_HALF = 4;
 export const WALL_OFFSET = 5.25;
 /** Radius of one tire in a tire wall stack (also the half thickness of the wall collider). */
 export const TIRE_RADIUS = 0.3;
+/** Height of one elevation level. */
+export const LEVEL_HEIGHT = 2;
+/** Highest level a piece can sit on (a ramp's top end included). */
+export const MAX_LEVEL = 4;
 
 export type Dir = 0 | 1 | 2 | 3;
 export type Rot = 0 | 1 | 2 | 3;
 
-export type PieceType = "straight" | "start" | "corner" | "wideCorner" | "hairpin";
+export type PieceType =
+  "straight" | "start" | "corner" | "wideCorner" | "hairpin" | "ramp" | "longRamp" | "chicane";
 export type PropType = "cone" | "tires";
 
+// Order matters: the share format stores the index (new types are appended).
 export const PIECE_TYPES: readonly PieceType[] = [
   "straight",
   "start",
   "corner",
   "wideCorner",
   "hairpin",
+  "ramp",
+  "longRamp",
+  "chicane",
 ];
 export const PROP_TYPES: readonly PropType[] = ["cone", "tires"];
 
@@ -46,14 +58,25 @@ export type PieceDef = {
   label: string;
   description: string;
   footprint: [number, number][];
-  /** Centerline from connector A (`connectors[0]`) to connector B (`connectors[1]`). */
-  segment: Segment;
+  /** Centerline from connector A (`connectors[0]`) to connector B (`connectors[1]`), in order. */
+  segments: Segment[];
   connectors: [Connector, Connector];
   /** Corners get red/white kerbs; straights get a plain white edge line. */
   kerbs: boolean;
+  /** Levels climbed from connector A to connector B (0: flat). */
+  rise: number;
 };
 
 const H = CELL / 2;
+/** Chicane: two opposite arcs shifting the road one cell sideways over two cells. */
+const CHICANE_R = 15;
+const CHICANE_A = Math.atan2(4, 3); // 53.13°: 2R(1 − cos a) = CELL, 2R sin a = 2 CELL
+
+const straightLine: Segment = { kind: "line", from: { x: 0, z: -H }, to: { x: 0, z: H } };
+const throughConnectors: [Connector, Connector] = [
+  { cell: [0, 0], dir: 2 },
+  { cell: [0, 0], dir: 0 },
+];
 
 export const PIECES: Record<PieceType, PieceDef> = {
   straight: {
@@ -61,36 +84,33 @@ export const PIECES: Record<PieceType, PieceDef> = {
     label: "Straight",
     description: "One cell of straight road",
     footprint: [[0, 0]],
-    segment: { kind: "line", from: { x: 0, z: -H }, to: { x: 0, z: H } },
-    connectors: [
-      { cell: [0, 0], dir: 2 },
-      { cell: [0, 0], dir: 0 },
-    ],
+    segments: [straightLine],
+    connectors: throughConnectors,
     kerbs: false,
+    rise: 0,
   },
   start: {
     type: "start",
     label: "Start / Finish",
     description: "Starting grid and finish line. The race runs towards the arrow.",
     footprint: [[0, 0]],
-    segment: { kind: "line", from: { x: 0, z: -H }, to: { x: 0, z: H } },
-    connectors: [
-      { cell: [0, 0], dir: 2 },
-      { cell: [0, 0], dir: 0 },
-    ],
+    segments: [straightLine],
+    connectors: throughConnectors,
     kerbs: false,
+    rise: 0,
   },
   corner: {
     type: "corner",
     label: "Corner",
     description: "Tight 90° corner in one cell. Rotate it to turn left or right.",
     footprint: [[0, 0]],
-    segment: { kind: "arc", center: { x: H, z: -H }, radius: H, a0: Math.PI, a1: Math.PI / 2 },
+    segments: [{ kind: "arc", center: { x: H, z: -H }, radius: H, a0: Math.PI, a1: Math.PI / 2 }],
     connectors: [
       { cell: [0, 0], dir: 2 },
       { cell: [0, 0], dir: 1 },
     ],
     kerbs: true,
+    rise: 0,
   },
   wideCorner: {
     type: "wideCorner",
@@ -102,18 +122,21 @@ export const PIECES: Record<PieceType, PieceDef> = {
       [0, 1],
       [1, 1],
     ],
-    segment: {
-      kind: "arc",
-      center: { x: CELL + H, z: -H },
-      radius: CELL + H,
-      a0: Math.PI,
-      a1: Math.PI / 2,
-    },
+    segments: [
+      {
+        kind: "arc",
+        center: { x: CELL + H, z: -H },
+        radius: CELL + H,
+        a0: Math.PI,
+        a1: Math.PI / 2,
+      },
+    ],
     connectors: [
       { cell: [0, 0], dir: 2 },
       { cell: [1, 1], dir: 1 },
     ],
     kerbs: true,
+    rise: 0,
   },
   hairpin: {
     type: "hairpin",
@@ -123,12 +146,72 @@ export const PIECES: Record<PieceType, PieceDef> = {
       [0, 0],
       [1, 0],
     ],
-    segment: { kind: "arc", center: { x: H, z: -H }, radius: H, a0: Math.PI, a1: 0 },
+    segments: [{ kind: "arc", center: { x: H, z: -H }, radius: H, a0: Math.PI, a1: 0 }],
     connectors: [
       { cell: [0, 0], dir: 2 },
       { cell: [1, 0], dir: 2 },
     ],
     kerbs: true,
+    rise: 0,
+  },
+  ramp: {
+    type: "ramp",
+    label: "Ramp",
+    description: "Climbs one level in one cell. Rotate it to drive down instead.",
+    footprint: [[0, 0]],
+    segments: [straightLine],
+    connectors: throughConnectors,
+    kerbs: false,
+    rise: 1,
+  },
+  longRamp: {
+    type: "longRamp",
+    label: "Long ramp",
+    description: "Gentle climb of one level over two cells",
+    footprint: [
+      [0, 0],
+      [0, 1],
+    ],
+    segments: [{ kind: "line", from: { x: 0, z: -H }, to: { x: 0, z: CELL + H } }],
+    connectors: [
+      { cell: [0, 0], dir: 2 },
+      { cell: [0, 1], dir: 0 },
+    ],
+    kerbs: false,
+    rise: 1,
+  },
+  chicane: {
+    type: "chicane",
+    label: "Chicane",
+    description: "S-bend shifting the road one cell sideways over 2 × 2 cells. F flips it.",
+    footprint: [
+      [0, 0],
+      [1, 0],
+      [0, 1],
+      [1, 1],
+    ],
+    segments: [
+      {
+        kind: "arc",
+        center: { x: CHICANE_R, z: -H },
+        radius: CHICANE_R,
+        a0: Math.PI,
+        a1: Math.PI - CHICANE_A,
+      },
+      {
+        kind: "arc",
+        center: { x: CELL - CHICANE_R, z: CELL + H },
+        radius: CHICANE_R,
+        a0: -CHICANE_A,
+        a1: 0,
+      },
+    ],
+    connectors: [
+      { cell: [0, 0], dir: 2 },
+      { cell: [1, 1], dir: 0 },
+    ],
+    kerbs: true,
+    rise: 0,
   },
 };
 
@@ -155,6 +238,11 @@ export function rotateVec(x: number, z: number, rot: number): [number, number] {
 
 export function rotateDir(dir: Dir, rot: number): Dir {
   return ((((dir + rot) % 4) + 4) % 4) as Dir;
+}
+
+/** Mirrors a direction across the local Z axis (+X ↔ −X). */
+export function flipDir(dir: Dir): Dir {
+  return dir === 1 ? 3 : dir === 3 ? 1 : dir;
 }
 
 export function segmentLength(s: Segment): number {
@@ -189,4 +277,27 @@ export function sampleSegment(s: Segment, step: number): { points: Vec2[]; tange
     }
   }
   return { points, tangents };
+}
+
+/** Samples a chain of segments as one centerline (shared joints appear once). */
+export function sampleSegments(
+  segments: Segment[],
+  step: number,
+): { points: Vec2[]; tangents: Vec2[] } {
+  const points: Vec2[] = [];
+  const tangents: Vec2[] = [];
+  segments.forEach((seg, k) => {
+    const s = sampleSegment(seg, step);
+    for (let i = k === 0 ? 0 : 1; i < s.points.length; i++) {
+      points.push(s.points[i]!);
+      tangents.push(s.tangents[i]!);
+    }
+  });
+  return { points, tangents };
+}
+
+/** Height profile of a ramp: 0 → 1 with level ends, so slopes join flat road smoothly. */
+export function riseProfile(t: number): number {
+  const u = Math.min(1, Math.max(0, t));
+  return u * u * (3 - 2 * u);
 }

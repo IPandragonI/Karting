@@ -1,19 +1,25 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { BINDABLE_ACTIONS, keyLabel } from "@/game/InputManager";
+import { useGameState } from "./useGame";
 
-const CONTROLS: [string[], string][] = [
-  [["W", "↑"], "Accelerate"],
-  [["S", "↓"], "Brake / reverse"],
-  [["A", "←"], "Steer left"],
-  [["D", "→"], "Steer right"],
-  [["Space"], "Handbrake / drift (hold while steering)"],
-  [["R"], "Reset to the track"],
-  [["Esc"], "Pause / menu"],
-];
-
-/** Controls reference as a native modal dialog (focus trap and Escape handled by the browser). */
+/**
+ * Controls reference as a native modal dialog (focus trap and Escape handled by the browser).
+ * Shows the player's current key bindings.
+ */
 export function HelpPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const bindings = useGameState((s) => s.bindings);
+  const controls: [string[], string][] = [
+    ...BINDABLE_ACTIONS.map(
+      ({ id, label }) =>
+        [bindings[id].filter((c): c is string => !!c).map((c) => keyLabel(c)), label] as [
+          string[],
+          string,
+        ],
+    ),
+    [["Esc"], "Pause / menu"],
+  ];
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const d = ref.current;
@@ -30,7 +36,7 @@ export function HelpPanel({ open, onClose }: { open: boolean; onClose: () => voi
         </h2>
         <table className="table mt-3 table-sm">
           <tbody>
-            {CONTROLS.map(([keys, action]) => (
+            {controls.map(([keys, action]) => (
               <tr key={action}>
                 <td className="whitespace-nowrap">
                   {keys.map((k, i) => (
@@ -46,9 +52,9 @@ export function HelpPanel({ open, onClose }: { open: boolean; onClose: () => voi
           </tbody>
         </table>
         <p className="mt-3 text-sm opacity-75">
-          Drift: hold <kbd className="kbd kbd-xs">Space</kbd> while turning at speed. Steer into the
-          drift to tighten the line, counter-steer to open it. On touch screens use the on-screen
-          pedals and arrows. Gamepads work too.
+          Drift: hold the handbrake while turning at speed. Steer into the drift to tighten the
+          line, counter-steer to open it. Keys can be changed in Settings. On touch screens use the
+          on-screen pedals and arrows. Gamepads work too.
         </p>
         <div className="modal-action">
           <button className="btn btn-primary" onClick={onClose}>

@@ -50,6 +50,26 @@ body {
   background: #1f2329;
 }
 
+/* HUD surfaces: compact dark glass that keeps contrast over a bright, sunny scene. */
+.hud-card {
+  background: color-mix(in oklab, #14171c 62%, transparent);
+  backdrop-filter: blur(8px);
+  border: 1px solid color-mix(in oklab, white 12%, transparent);
+  border-radius: 0.875rem;
+  color: #f6f4ee;
+}
+
+.hud-btn {
+  background: color-mix(in oklab, #14171c 62%, transparent);
+  backdrop-filter: blur(8px);
+  border: 1px solid color-mix(in oklab, white 12%, transparent);
+  color: #f6f4ee;
+}
+
+.hud-btn:hover {
+  background: color-mix(in oklab, #14171c 80%, transparent);
+}
+
 /* Glass panels over the canvas. */
 .glass-panel {
   background: color-mix(in oklab, var(--color-base-100) 78%, transparent);
@@ -58,6 +78,6 @@ body {
 }
 
 .hud-text {
-  text-shadow: 0 2px 6px rgb(0 0 0 / 0.45);
+  text-shadow: 0 1px 4px rgb(0 0 0 / 0.5);
   font-variant-numeric: tabular-nums;
 }

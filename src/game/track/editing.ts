@@ -1,4 +1,13 @@
-import { CELL, type PieceType, type PropType, type Rot } from "./pieces";
+import {
+  CELL,
+  DIR_VEC,
+  MAX_LEVEL,
+  PIECES,
+  rotateDir,
+  type PieceType,
+  type PropType,
+  type Rot,
+} from "./pieces";
 import {
   cellKey,
   cloneTrack,
@@ -6,6 +15,8 @@ import {
   GRID_LIMIT,
   MAX_PIECES,
   MAX_PROPS,
+  pieceLevel,
+  worldConnectors,
   type PieceData,
   type TrackData,
 } from "./Track";
@@ -15,6 +26,30 @@ import {
 
 export type EditResult =
   { ok: true; track: TrackData; note?: string } | { ok: false; reason: string };
+
+/** Pieces that look the same mirrored: their flip flag means nothing and is kept off. */
+const SYMMETRIC = new Set<PieceType>(["straight", "start", "ramp", "longRamp"]);
+
+export type PlaceOptions = {
+  /** Elevation level at connector A. */
+  y?: number;
+  /** Mirrored left ↔ right. */
+  flip?: boolean;
+};
+
+/** A piece with canonical optional fields (absent when 0 / false), so equal pieces compare equal. */
+export function makePiece(
+  type: PieceType,
+  x: number,
+  z: number,
+  rot: Rot,
+  opts: PlaceOptions = {},
+): PieceData {
+  const piece: PieceData = { type, x, z, rot };
+  if (opts.y) piece.y = opts.y;
+  if (opts.flip && !SYMMETRIC.has(type)) piece.flip = true;
+  return piece;
+}
 
 /** Index of the piece covering a cell, or −1. */
 export function pieceAt(track: TrackData, cx: number, cz: number): number {
@@ -36,6 +71,10 @@ export function checkPiecePlacement(
     if (i >= 0) hit.add(i);
   }
   if (hit.size > 1) return { ok: false, reason: "Overlaps several pieces (erase them first)" };
+  const level = pieceLevel(piece);
+  if (level < 0 || level + PIECES[piece.type].rise > MAX_LEVEL) {
+    return { ok: false, reason: `Too high (top level is ${MAX_LEVEL})` };
+  }
   const replaces = hit.size === 1 ? [...hit][0]! : null;
   if (replaces !== null) {
     const old = track.pieces[replaces]!;
@@ -43,7 +82,9 @@ export function checkPiecePlacement(
       old.type === piece.type &&
       old.rot === piece.rot &&
       old.x === piece.x &&
-      old.z === piece.z
+      old.z === piece.z &&
+      pieceLevel(old) === level &&
+      !!old.flip === !!piece.flip
     ) {
       return { ok: false, reason: "Same piece already here" };
     }
@@ -60,8 +101,9 @@ export function placePiece(
   x: number,
   z: number,
   rot: Rot,
+  opts: PlaceOptions = {},
 ): EditResult {
-  const piece: PieceData = { type, x, z, rot };
+  const piece = makePiece(type, x, z, rot, opts);
   const check = checkPiecePlacement(track, piece);
   if (!check.ok) return check;
   const next = cloneTrack(track);
@@ -88,6 +130,59 @@ export function erasePieceAt(track: TrackData, cx: number, cz: number): EditResu
   const next = cloneTrack(track);
   next.pieces.splice(i, 1);
   return { ok: true, track: next };
+}
+
+/**
+ * Level at which a new piece joins the road next to it: the first of its two ends that meets a
+ * neighbour's open end decides. Null when it touches no road (the editor's chosen level applies).
+ */
+export function autoLevel(track: TrackData, piece: PieceData): number | null {
+  const rise = PIECES[piece.type].rise;
+  const own = worldConnectors({ ...piece, y: 0 });
+  for (const k of [0, 1] as const) {
+    const c = own[k];
+    const [dx, dz] = DIR_VEC[c.dir];
+    const nx = c.cell[0] + dx;
+    const nz = c.cell[1] + dz;
+    const i = pieceAt(track, nx, nz);
+    if (i < 0) continue;
+    const opposite = rotateDir(c.dir, 2);
+    const match = worldConnectors(track.pieces[i]!).find(
+      (o) => o.cell[0] === nx && o.cell[1] === nz && o.dir === opposite,
+    );
+    if (!match) continue;
+    const level = match.level - (k === 1 ? rise : 0);
+    if (level >= 0 && level + rise <= MAX_LEVEL) return level;
+  }
+  return null;
+}
+
+/** Raises (delta > 0) or lowers the piece covering a cell by whole levels. */
+export function changeLevel(track: TrackData, cx: number, cz: number, delta: number): EditResult {
+  const i = pieceAt(track, cx, cz);
+  if (i < 0) return { ok: false, reason: "No piece here" };
+  const p = track.pieces[i]!;
+  const level = pieceLevel(p) + delta;
+  if (level < 0) return { ok: false, reason: "Already on the ground" };
+  if (level + PIECES[p.type].rise > MAX_LEVEL)
+    return { ok: false, reason: `Already at the top level (${MAX_LEVEL})` };
+  const next = cloneTrack(track);
+  next.pieces[i] = makePiece(p.type, p.x, p.z, p.rot, { y: level, flip: p.flip });
+  return { ok: true, track: next, note: `Level ${level}` };
+}
+
+/**
+ * Mirror image of the whole circuit (left turns become right turns), across the X = 0 axis.
+ * World mirroring turns a piece's rotation r into −r and toggles its flip, and moves its anchor
+ * cell to −x; the race keeps running through the start line the same way relative to it.
+ */
+export function mirrorTrack(track: TrackData): TrackData {
+  const next = cloneTrack(track);
+  next.pieces = track.pieces.map((p) =>
+    makePiece(p.type, -p.x, p.z, ((4 - p.rot) % 4) as Rot, { y: p.y, flip: !p.flip }),
+  );
+  next.props = track.props.map((p) => ({ ...p, x: p.x === 0 ? 0 : -p.x }));
+  return next;
 }
 
 /** Props snap to a half-unit grid. */

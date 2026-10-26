@@ -1,35 +1,61 @@
-// Procedural sound with WebAudio, no files to download:
-// - engine: two detuned oscillators through a lowpass, pitch from speed, a fast tremolo for the
-//   buzzy two-stroke character, louder on throttle;
-// - tire squeal: looped noise through a resonant bandpass, gain from slip;
-// - grass rumble: low-passed noise while off track;
-// - impacts and UI beeps: short synthesized one-shots.
-// The context is created on the first user gesture (browsers block audio before that).
+import { ENGINE_WORKLET_SOURCE, engineRpm, RPM_IDLE } from "./audio/engineDsp";
+
+// Procedural sound with Web Audio, no files to download:
+// - engine: a two-stroke kart engine synthesized in an AudioWorklet (see audio/engineDsp.ts),
+//   revs from a gearless clutch model; a simple oscillator engine is the fallback where
+//   AudioWorklet is unavailable;
+// - tires: squeal while sliding (with a slight wobble so it never sounds static) and a duller
+//   scrub under hard braking;
+// - wind rising with speed, grass rumble off track, impacts and lap chimes.
+//
+// Browsers only start audio after a user gesture: `unlock()` is called on the first key press,
+// click or touch anywhere, and `onStateChange` lets the HUD offer a "tap to enable sound" hint
+// until then.
 
 const MUTE_KEY = "karting:muted";
+const VOLUME_KEY = "karting:volume";
+const MASTER = 0.8;
+export const DEFAULT_VOLUME = 0.8;
+
+export type AudioState = "locked" | "running";
 
 export class AudioManager {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
   private engineGain: GainNode | null = null;
-  private engineOsc: OscillatorNode[] = [];
-  private engineFilter: BiquadFilterNode | null = null;
-  private tremolo: OscillatorNode | null = null;
+  private rpmParam: AudioParam | null = null;
+  private loadParam: AudioParam | null = null;
+  private fallback: { osc: OscillatorNode[]; filter: BiquadFilterNode } | null = null;
   private squealGain: GainNode | null = null;
   private squealFilter: BiquadFilterNode | null = null;
+  private scrubGain: GainNode | null = null;
+  private windGain: GainNode | null = null;
+  private windFilter: BiquadFilterNode | null = null;
   private rumbleGain: GainNode | null = null;
   private noise: AudioBuffer | null = null;
   private lastImpact = 0;
+  private rpm = RPM_IDLE;
+  private load = 0;
+  private wobble = 0;
   muted: boolean;
+  /** Master volume, 0..1 (independent of mute). */
+  volume = DEFAULT_VOLUME;
+  onStateChange: (state: AudioState) => void = () => {};
 
   constructor() {
     let muted = false;
     try {
       muted = localStorage.getItem(MUTE_KEY) === "1";
+      const v = Number(localStorage.getItem(VOLUME_KEY) ?? NaN);
+      if (Number.isFinite(v) && v >= 0 && v <= 1) this.volume = v;
     } catch {
       // Storage unavailable (private mode): default to sound on.
     }
     this.muted = muted;
+  }
+
+  get state(): AudioState {
+    return this.ctx?.state === "running" ? "running" : "locked";
   }
 
   /** Call from a user gesture handler. Safe to call repeatedly. */
@@ -40,76 +66,116 @@ export class AudioManager {
         (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (!Ctor) return;
       this.ctx = new Ctor();
+      this.ctx.addEventListener("statechange", () => this.onStateChange(this.state));
       this.build(this.ctx);
     }
     if (this.ctx.state === "suspended") void this.ctx.resume();
   }
 
+  private loopNoise(ctx: AudioContext, rate = 1) {
+    const src = ctx.createBufferSource();
+    src.buffer = this.noise;
+    src.loop = true;
+    src.playbackRate.value = rate;
+    src.start(0, Math.random() * 1.5);
+    return src;
+  }
+
   private build(ctx: AudioContext) {
     this.master = ctx.createGain();
-    this.master.gain.value = this.muted ? 0 : 0.7;
-    this.master.connect(ctx.destination);
+    this.master.gain.value = this.masterGain();
+    // Gentle bus compression keeps impacts and the engine from jumping out.
+    const comp = ctx.createDynamicsCompressor();
+    comp.threshold.value = -14;
+    comp.ratio.value = 3;
+    comp.attack.value = 0.005;
+    comp.release.value = 0.2;
+    this.master.connect(comp).connect(ctx.destination);
 
-    // White noise buffer shared by squeal, rumble and impacts.
     this.noise = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
     const data = this.noise.getChannelData(0);
     for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
 
-    // Engine.
-    this.engineFilter = ctx.createBiquadFilter();
-    this.engineFilter.type = "lowpass";
-    this.engineFilter.frequency.value = 700;
-    this.engineFilter.Q.value = 2;
+    // Engine (worklet, or oscillator fallback).
     this.engineGain = ctx.createGain();
     this.engineGain.gain.value = 0;
-    const tremoloDepth = ctx.createGain();
-    tremoloDepth.gain.value = 0.35;
-    const tremoloGain = ctx.createGain();
-    tremoloGain.gain.value = 0.65;
-    this.tremolo = ctx.createOscillator();
-    this.tremolo.type = "square";
-    this.tremolo.frequency.value = 30;
-    this.tremolo.connect(tremoloDepth).connect(tremoloGain.gain);
-    for (const [type, detune] of [
-      ["sawtooth", 0],
-      ["square", -1200],
-    ] as const) {
-      const o = ctx.createOscillator();
-      o.type = type;
-      o.frequency.value = 60;
-      o.detune.value = detune;
-      o.connect(this.engineFilter);
-      o.start();
-      this.engineOsc.push(o);
+    this.engineGain.connect(this.master);
+    if (ctx.audioWorklet) {
+      const url = URL.createObjectURL(
+        new Blob([ENGINE_WORKLET_SOURCE], { type: "text/javascript" }),
+      );
+      ctx.audioWorklet
+        .addModule(url)
+        .then(() => {
+          if (!this.engineGain) return;
+          const node = new AudioWorkletNode(ctx, "kart-engine", { outputChannelCount: [1] });
+          node.connect(this.engineGain);
+          this.rpmParam = node.parameters.get("rpm") ?? null;
+          this.loadParam = node.parameters.get("load") ?? null;
+        })
+        .catch((err) => {
+          console.warn("Engine worklet unavailable, using the simple engine sound.", err);
+          this.buildFallbackEngine(ctx);
+        })
+        .finally(() => URL.revokeObjectURL(url));
+    } else {
+      this.buildFallbackEngine(ctx);
     }
-    this.engineFilter.connect(tremoloGain).connect(this.engineGain).connect(this.master);
-    this.tremolo.start();
 
-    // Tire squeal.
-    const squealSrc = ctx.createBufferSource();
-    squealSrc.buffer = this.noise;
-    squealSrc.loop = true;
+    // Tire squeal: noise through a resonant bandpass.
     this.squealFilter = ctx.createBiquadFilter();
     this.squealFilter.type = "bandpass";
-    this.squealFilter.frequency.value = 1700;
-    this.squealFilter.Q.value = 7;
+    this.squealFilter.frequency.value = 1900;
+    this.squealFilter.Q.value = 9;
     this.squealGain = ctx.createGain();
     this.squealGain.gain.value = 0;
-    squealSrc.connect(this.squealFilter).connect(this.squealGain).connect(this.master);
-    squealSrc.start();
+    this.loopNoise(ctx).connect(this.squealFilter).connect(this.squealGain).connect(this.master);
+
+    // Braking scrub: lower, wider band.
+    const scrubFilter = ctx.createBiquadFilter();
+    scrubFilter.type = "bandpass";
+    scrubFilter.frequency.value = 650;
+    scrubFilter.Q.value = 1.2;
+    this.scrubGain = ctx.createGain();
+    this.scrubGain.gain.value = 0;
+    this.loopNoise(ctx, 0.8).connect(scrubFilter).connect(this.scrubGain).connect(this.master);
+
+    // Wind.
+    this.windFilter = ctx.createBiquadFilter();
+    this.windFilter.type = "lowpass";
+    this.windFilter.frequency.value = 400;
+    this.windGain = ctx.createGain();
+    this.windGain.gain.value = 0;
+    this.loopNoise(ctx, 0.6).connect(this.windFilter).connect(this.windGain).connect(this.master);
 
     // Grass rumble.
-    const rumbleSrc = ctx.createBufferSource();
-    rumbleSrc.buffer = this.noise;
-    rumbleSrc.loop = true;
-    rumbleSrc.playbackRate.value = 0.5;
     const rumbleFilter = ctx.createBiquadFilter();
     rumbleFilter.type = "lowpass";
-    rumbleFilter.frequency.value = 260;
+    rumbleFilter.frequency.value = 240;
     this.rumbleGain = ctx.createGain();
     this.rumbleGain.gain.value = 0;
-    rumbleSrc.connect(rumbleFilter).connect(this.rumbleGain).connect(this.master);
-    rumbleSrc.start();
+    this.loopNoise(ctx, 0.5).connect(rumbleFilter).connect(this.rumbleGain).connect(this.master);
+  }
+
+  /** Plain oscillators: much less convincing, only for browsers without AudioWorklet. */
+  private buildFallbackEngine(ctx: AudioContext) {
+    if (!this.engineGain || this.fallback) return;
+    const filter = ctx.createBiquadFilter();
+    filter.type = "lowpass";
+    filter.frequency.value = 1200;
+    const osc = (["sawtooth", "square"] as const).map((type, i) => {
+      const o = ctx.createOscillator();
+      o.type = type;
+      o.frequency.value = RPM_IDLE / 60;
+      o.detune.value = i * 7;
+      o.connect(filter);
+      o.start();
+      return o;
+    });
+    const trim = ctx.createGain();
+    trim.gain.value = 0.25;
+    filter.connect(trim).connect(this.engineGain);
+    this.fallback = { osc, filter };
   }
 
   setMuted(muted: boolean) {
@@ -119,35 +185,85 @@ export class AudioManager {
     } catch {
       // Not persisted; the toggle still works for this session.
     }
+    this.applyMaster();
+  }
+
+  setVolume(volume: number) {
+    this.volume = Math.max(0, Math.min(1, volume));
+    try {
+      localStorage.setItem(VOLUME_KEY, String(this.volume));
+    } catch {
+      // Not persisted; applies for this session.
+    }
+    this.applyMaster();
+  }
+
+  /** Perceptual curve: the slider's middle sounds like half as loud, not barely quieter. */
+  private masterGain() {
+    return this.muted ? 0 : MASTER * this.volume * this.volume * 1.5625;
+  }
+
+  private applyMaster() {
     if (this.ctx && this.master)
-      this.master.gain.setTargetAtTime(muted ? 0 : 0.7, this.ctx.currentTime, 0.05);
+      this.master.gain.setTargetAtTime(this.masterGain(), this.ctx.currentTime, 0.05);
   }
 
   /**
-   * Continuous sounds, called every frame. `speed01` is |speed| / max speed.
-   * Pass `active = false` in menus and pauses to fade everything out.
+   * Continuous sounds, called every rendered frame. `speed01` is |forward speed| / max speed.
+   * Pass `active = false` while paused or editing to fade everything out.
    */
-  update(active: boolean, speed01: number, throttle: number, slip: number, offTrack: number) {
+  update(
+    dt: number,
+    active: boolean,
+    speed01: number,
+    throttle: number,
+    slip: number,
+    braking: number,
+    offTrack: boolean,
+  ) {
     const ctx = this.ctx;
     if (
       !ctx ||
       !this.engineGain ||
-      !this.engineFilter ||
-      !this.tremolo ||
       !this.squealGain ||
+      !this.scrubGain ||
+      !this.windGain ||
       !this.rumbleGain
     )
       return;
     const t = ctx.currentTime;
-    const s = Math.min(1, speed01);
-    const freq = 55 + s * 150 + throttle * 12;
-    for (const o of this.engineOsc) o.frequency.setTargetAtTime(freq, t, 0.06);
-    this.tremolo.frequency.setTargetAtTime(freq * 0.5, t, 0.06);
-    this.engineFilter.frequency.setTargetAtTime(500 + s * 1500 + throttle * 600, t, 0.08);
-    this.engineGain.gain.setTargetAtTime(active ? 0.07 + throttle * 0.06 + s * 0.04 : 0, t, 0.1);
-    this.squealGain.gain.setTargetAtTime(active ? Math.min(1, slip) * 0.16 : 0, t, 0.05);
-    this.squealFilter!.frequency.setTargetAtTime(1500 + slip * 500, t, 0.1);
-    this.rumbleGain.gain.setTargetAtTime(active ? offTrack * Math.min(1, s * 2) * 0.5 : 0, t, 0.08);
+    const s = Math.min(1, Math.max(0, speed01));
+
+    // Revs: quick to rise on throttle, slower to fall (rotating mass), never a jump.
+    const target = engineRpm(s, throttle);
+    const rate = target > this.rpm ? 5 + throttle * 5 : 3.5;
+    this.rpm += (target - this.rpm) * (1 - Math.exp(-rate * dt));
+    this.load += (throttle - this.load) * (1 - Math.exp(-12 * dt));
+    if (this.rpmParam && this.loadParam) {
+      this.rpmParam.setTargetAtTime(this.rpm, t, 0.02);
+      this.loadParam.setTargetAtTime(this.load, t, 0.02);
+    } else if (this.fallback) {
+      for (const o of this.fallback.osc) o.frequency.setTargetAtTime(this.rpm / 60, t, 0.04);
+      this.fallback.filter.frequency.setTargetAtTime(600 + this.load * 1400 + s * 800, t, 0.05);
+    }
+    this.engineGain.gain.setTargetAtTime(active ? 0.55 + 0.3 * this.load + 0.15 * s : 0, t, 0.08);
+
+    this.wobble += dt * 7;
+    const squeal = Math.pow(Math.min(1, slip), 1.4);
+    this.squealGain.gain.setTargetAtTime(active ? squeal * 0.13 : 0, t, 0.05);
+    this.squealFilter!.frequency.setTargetAtTime(
+      1700 + squeal * 450 + Math.sin(this.wobble) * 70,
+      t,
+      0.04,
+    );
+    this.scrubGain.gain.setTargetAtTime(active ? Math.min(1, braking) * s * 0.18 : 0, t, 0.06);
+    this.windGain.gain.setTargetAtTime(active ? s * s * 0.09 : 0, t, 0.2);
+    this.windFilter!.frequency.setTargetAtTime(300 + s * 900, t, 0.2);
+    this.rumbleGain.gain.setTargetAtTime(
+      active && offTrack ? Math.min(1, s * 2) * 0.45 : 0,
+      t,
+      0.08,
+    );
   }
 
   impact(strength: number) {
@@ -168,51 +284,44 @@ export class AudioManager {
     src.connect(filter).connect(g).connect(this.master);
     src.start(now, Math.random());
     src.stop(now + 0.3);
+    // Rubbery thump of the tire barrier.
     const thump = ctx.createOscillator();
     thump.frequency.setValueAtTime(110, now);
     thump.frequency.exponentialRampToValueAtTime(45, now + 0.15);
     const tg = ctx.createGain();
-    tg.gain.setValueAtTime(0.4 * v, now);
+    tg.gain.setValueAtTime(0.45 * v, now);
     tg.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
     thump.connect(tg).connect(this.master);
     thump.start(now);
     thump.stop(now + 0.2);
   }
 
-  beep(kind: "count" | "go" | "lap" | "best" | "finish" | "error") {
+  beep(kind: "lap" | "best" | "error") {
     const ctx = this.ctx;
     if (!ctx || !this.master) return;
     const notes: Record<typeof kind, [number, number][]> = {
-      count: [[440, 0.15]],
-      go: [[880, 0.45]],
       lap: [
-        [660, 0.1],
-        [880, 0.16],
+        [784, 0.09],
+        [1047, 0.16],
       ],
       best: [
-        [660, 0.09],
-        [880, 0.09],
-        [1320, 0.22],
-      ],
-      finish: [
-        [523, 0.12],
-        [659, 0.12],
-        [784, 0.12],
-        [1047, 0.4],
+        [784, 0.08],
+        [1047, 0.08],
+        [1568, 0.24],
       ],
       error: [
-        [220, 0.12],
-        [180, 0.2],
+        [330, 0.1],
+        [262, 0.18],
       ],
     };
     let t = ctx.currentTime;
     for (const [freq, dur] of notes[kind]) {
       const o = ctx.createOscillator();
-      o.type = "square";
+      o.type = "triangle";
       o.frequency.value = freq;
       const g = ctx.createGain();
       g.gain.setValueAtTime(0.0001, t);
-      g.gain.exponentialRampToValueAtTime(0.12, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.16, t + 0.01);
       g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
       o.connect(g).connect(this.master);
       o.start(t);

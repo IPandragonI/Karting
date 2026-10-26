@@ -1,8 +1,23 @@
 import { describe, expect, it } from "vitest";
 import { createDefaultTrack } from "@/game/track/defaultTrack";
-import { eraseAt, History, placePiece, placeProp } from "@/game/track/editing";
-import { CELL } from "@/game/track/pieces";
-import { analyzeTrack, isRaceable, type TrackData } from "@/game/track/Track";
+import {
+  autoLevel,
+  changeLevel,
+  eraseAt,
+  History,
+  makePiece,
+  mirrorTrack,
+  placePiece,
+  placeProp,
+} from "@/game/track/editing";
+import { CELL, MAX_LEVEL } from "@/game/track/pieces";
+import {
+  analyzeTrack,
+  buildRacePath,
+  isRaceable,
+  trackId,
+  type TrackData,
+} from "@/game/track/Track";
 
 const empty = (): TrackData => ({ version: 1, name: "t", pieces: [], props: [] });
 
@@ -96,5 +111,40 @@ describe("History", () => {
     expect(h.redo(a)).toEqual(b);
     h.push(b);
     expect(h.canRedo).toBe(false);
+  });
+
+  it("mirrors a circuit into a valid one of the same length, and back again exactly", () => {
+    const t = createDefaultTrack();
+    const m = mirrorTrack(t);
+    const layout = analyzeTrack(m);
+    expect(layout.issues).toEqual([]);
+    expect(isRaceable(layout)).toBe(true);
+    const len = (x: TrackData) => buildRacePath(x, analyzeTrack(x)).totalLength;
+    expect(len(m)).toBeCloseTo(len(t), 6);
+    expect(trackId(m)).not.toBe(trackId(t));
+    expect(mirrorTrack(m)).toEqual(t);
+  });
+
+  it("joins new pieces to raised road at the right level", () => {
+    let t = must(placePiece(empty(), "straight", 0, 0, 0, { y: 2 }));
+    // A ramp after it starts at level 2 (its low end, A, joins).
+    expect(autoLevel(t, makePiece("ramp", 0, 1, 0))).toBe(2);
+    // Turned around, its high end (B) joins: it starts one level lower.
+    expect(autoLevel(t, makePiece("ramp", 0, 1, 2))).toBe(1);
+    // Nothing to join.
+    expect(autoLevel(t, makePiece("straight", 5, 5, 0))).toBeNull();
+    t = must(placePiece(t, "ramp", 0, 1, 0, { y: 2 }));
+    expect(t.pieces[1]).toEqual({ type: "ramp", x: 0, z: 1, rot: 0, y: 2 });
+  });
+
+  it("raises and lowers pieces within the level range", () => {
+    let t = must(placePiece(empty(), "ramp", 0, 0, 0));
+    expect(changeLevel(t, 0, 0, -1)).toMatchObject({ ok: false });
+    for (let i = 0; i < MAX_LEVEL - 1; i++) t = must(changeLevel(t, 0, 0, 1));
+    // A ramp's top end may not go above the top level.
+    expect(changeLevel(t, 0, 0, 1)).toMatchObject({ ok: false });
+    t = must(changeLevel(t, 0, 0, -(MAX_LEVEL - 1)));
+    expect(t.pieces[0]).toEqual({ type: "ramp", x: 0, z: 0, rot: 0 });
+    expect(changeLevel(t, 4, 4, 1)).toMatchObject({ ok: false, reason: "No piece here" });
   });
 });

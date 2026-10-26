@@ -72,22 +72,24 @@ export class SkidMarks {
     const w = 0.13;
     const nx = (-dz / len) * w;
     const nz = (dx / len) * w;
-    const y = 0.035;
+    // Just above the road surface (p.y is the ground height under the wheel).
+    const y0 = last.y + 0.035;
+    const y1 = p.y + 0.035;
     const i = this.next;
     const o = i * 12;
     this.positions.set(
       [
         last.x + nx,
-        y,
+        y0,
         last.z + nz,
         last.x - nx,
-        y,
+        y0,
         last.z - nz,
         p.x + nx,
-        y,
+        y1,
         p.z + nz,
         p.x - nx,
-        y,
+        y1,
         p.z - nz,
       ],
       o,
@@ -184,7 +186,7 @@ export class Particles {
     const i = this.cursor;
     this.cursor = (this.cursor + 1) % MAX_PARTICLES;
     this.pos[i * 3] = p.x + (Math.random() - 0.5) * 0.2;
-    this.pos[i * 3 + 1] = 0.15;
+    this.pos[i * 3 + 1] = p.y + 0.15;
     this.pos[i * 3 + 2] = p.z + (Math.random() - 0.5) * 0.2;
     this.vel[i * 3] = vx * 0.15 + (Math.random() - 0.5) * 0.8;
     this.vel[i * 3 + 1] = 0.6 + Math.random() * 0.6;

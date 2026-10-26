@@ -3,100 +3,95 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 
 // Models are CC0 assets from Kenney (see ASSETS.md), served from /public/models.
 
-export const KART_MODELS = [
-  "kart-oobi",
-  "kart-oodi",
-  "kart-ooli",
-  "kart-oopi",
-  "kart-oozi",
-] as const;
-export type KartModel = (typeof KART_MODELS)[number];
-
 /**
- * Livery per driver. The drivers all wear a white helmet, so from the chase camera the kart body
- * colour is what tells them apart (and what the menu swatches show).
+ * Liveries for the kart: the chassis, the driver's suit and helmet take this colour. The Car Kit
+ * karts all share one chassis, so a single model is loaded and tinted.
  */
-export const KART_LIVERY: Record<KartModel, string> = {
-  "kart-oobi": "#f2efe6",
-  "kart-oodi": "#8fd36a",
-  "kart-ooli": "#79b8e8",
-  "kart-oopi": "#f28fb8",
-  "kart-oozi": "#f2c14e",
-};
+export const LIVERIES = [
+  { id: "snow", label: "Snow", color: "#f2efe6" },
+  { id: "kerb", label: "Kerb red", color: "#e5483b" },
+  { id: "sky", label: "Sky blue", color: "#4f9de0" },
+  { id: "lime", label: "Lime", color: "#7cc35a" },
+  { id: "sun", label: "Sunflower", color: "#f2c14e" },
+] as const;
+export type LiveryId = (typeof LIVERIES)[number]["id"];
 
-const PROP_MODELS = [
+const MODELS = [
+  "kart-oobi",
   "cone",
   "treeLarge",
   "treeSmall",
   "tentClosed",
   "grandStand",
+  "grandStandCovered",
   "flagCheckers",
+  "flagGreen",
+  "flagRed",
+  "billboard",
+  "billboardLow",
+  "fenceStraight",
+  "lightPostLarge",
+  "bannerTowerGreen",
+  "bannerTowerRed",
+  "pitsGarage",
+  "pitsGarageClosed",
+  "pitsOffice",
 ] as const;
-export type PropModel = (typeof PROP_MODELS)[number];
-
-/** Props are all loaded up front; karts load lazily (only the chosen one at startup). */
-export type Models = Record<PropModel, THREE.Group> & {
-  karts: Partial<Record<KartModel, THREE.Group>>;
-};
+export type ModelName = (typeof MODELS)[number];
+export type Models = Record<ModelName, THREE.Group>;
 
 const loader = new GLTFLoader();
-const cache = new Map<string, Promise<THREE.Group>>();
 
 /**
- * Loads a model once (cached). The Racing Kit models carry an odd root offset, so props are
- * re-centred: footprint centred on the origin, base at y = 0. Karts are left untouched because
- * their wheel nodes define the pivots we animate.
+ * Loads every model once (about 0.6 MB in total). The Racing Kit models carry an odd root offset,
+ * so props are re-centred: footprint centred on the origin, base at y = 0. The kart is left
+ * untouched because its wheel nodes define the pivots we animate.
  */
-function loadModel(name: KartModel | PropModel): Promise<THREE.Group> {
-  let p = cache.get(name);
-  if (!p) {
-    p = loader.loadAsync(`/models/${name}.glb`).then((gltf) => {
+export async function loadModels(
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<Models> {
+  let loaded = 0;
+  const entries = await Promise.all(
+    MODELS.map(async (name) => {
+      const gltf = await loader.loadAsync(`/models/${name}.glb`);
       const root = gltf.scene;
       root.traverse((o) => {
         if ((o as THREE.Mesh).isMesh) {
           const mesh = o as THREE.Mesh;
           mesh.castShadow = true;
           mesh.receiveShadow = true;
+          for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material])
+            tuneMaterial(m as THREE.MeshStandardMaterial, name);
         }
       });
       if (!name.startsWith("kart-")) recenter(root);
-      return root;
-    });
-    // A failed download may succeed on retry; do not cache the rejection.
-    p.catch(() => cache.delete(name));
-    cache.set(name, p);
+      onProgress?.(++loaded, MODELS.length);
+      return [name, root] as const;
+    }),
+  );
+  return Object.fromEntries(entries) as Models;
+}
+
+/**
+ * The kit's materials are all fully rough. A touch of sheen gives the soft sun something to
+ * model shapes with: painted kart bodies and plastic read glossier, glass reflects, everything
+ * else stays matte. Materials are shared within a model, so each is tuned once.
+ */
+const tuned = new WeakSet<THREE.Material>();
+function tuneMaterial(m: THREE.MeshStandardMaterial, model: string) {
+  if (!m.isMeshStandardMaterial || tuned.has(m)) return;
+  tuned.add(m);
+  const name = m.name.toLowerCase();
+  if (name === "glass") {
+    m.roughness = 0.25;
+    m.metalness = 0.1;
+  } else if (model.startsWith("kart-")) {
+    m.roughness = 0.55;
+  } else if (name === "pylon" || name === "checkers" || name === "red") {
+    m.roughness = 0.7;
+  } else {
+    m.roughness = 0.92;
   }
-  return p;
-}
-
-export async function loadModels(
-  kart: KartModel,
-  onProgress?: (loaded: number, total: number) => void,
-): Promise<Models> {
-  const names = [...PROP_MODELS];
-  const total = names.length + 1;
-  let loaded = 0;
-  const tick = <T>(v: T) => {
-    onProgress?.(++loaded, total);
-    return v;
-  };
-  const [kartRoot, ...props] = await Promise.all([
-    loadModel(kart).then(tick),
-    ...names.map((n) => loadModel(n).then(tick)),
-  ]);
-  const models = Object.fromEntries(names.map((n, i) => [n, props[i]!])) as Record<
-    PropModel,
-    THREE.Group
-  >;
-  return { ...models, karts: { [kart]: kartRoot } };
-}
-
-export async function loadKart(models: Models, kart: KartModel): Promise<THREE.Group> {
-  const existing = models.karts[kart];
-  if (existing) return existing;
-  const root = await loadModel(kart);
-  models.karts[kart] = root;
-  return root;
 }
 
 function recenter(root: THREE.Group) {

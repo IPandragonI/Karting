@@ -23,7 +23,7 @@ export function ShareDialog({
 }: {
   open: boolean;
   onClose: () => void;
-  source: "editor" | "menu";
+  source: "editor" | "game";
 }) {
   const game = useGame();
   const ref = useRef<HTMLDialogElement>(null);
@@ -81,7 +81,7 @@ export function ShareDialog({
       return;
     }
     if (source === "editor") game.editorReplace(r.track);
-    else game.loadTrack(r.track);
+    else game.importTrack(r.track);
     onClose();
   };
 

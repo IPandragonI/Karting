@@ -3,10 +3,14 @@ import type { Models } from "./assets";
 import type { CameraRig } from "./Camera";
 import { isTypingTarget } from "./InputManager";
 import {
+  autoLevel,
+  changeLevel,
   checkPiecePlacement,
   checkPropPlacement,
   eraseAt,
   History,
+  makePiece,
+  mirrorTrack,
   pieceAt,
   placePiece,
   placeProp,
@@ -17,6 +21,8 @@ import {
 import {
   CELL,
   DIR_VEC,
+  LEVEL_HEIGHT,
+  MAX_LEVEL,
   PIECE_TYPES,
   PIECES,
   PROP_TYPES,
@@ -26,7 +32,9 @@ import {
 } from "./track/pieces";
 import {
   analyzeTrack,
+  cloneTrack,
   footprintCells,
+  pieceLevel,
   toWorld,
   trackBounds,
   type TrackData,
@@ -35,14 +43,17 @@ import {
 import { buildTrack, type BuiltTrack } from "./track/TrackBuilder";
 
 // Grid editor. Interaction model (same for mouse and touch):
-// - click / tap: use the current tool (place, or erase); right click always erases;
+// - click / tap: use the current tool (place, raise, or erase); right click erases (lowers with
+//   the height tool);
 // - drag (one finger or mouse): pan; wheel / pinch: zoom; arrow keys / WASD pan too;
-// - R rotates (Shift+R backwards), 1–7 pick tools, X erase, Ctrl+Z / Ctrl+Y undo / redo.
+// - R rotates (Shift+R backwards), F flips, + / − change the level for new pieces, I picks up
+//   the piece under the pointer, 1–9 pick tools, H height tool, X erase, Ctrl+Z / Ctrl+Y undo.
+// New pieces join raised road at its level automatically; the chosen level applies elsewhere.
 // The editor only edits TrackData; the host rebuilds the real track after every change, so the
 // preview is exactly what will be driven.
 
-export type EditorTool = PieceType | PropType | "erase";
-export const EDITOR_TOOLS: EditorTool[] = [...PIECE_TYPES, ...PROP_TYPES, "erase"];
+export type EditorTool = PieceType | PropType | "level" | "erase";
+export const EDITOR_TOOLS: EditorTool[] = [...PIECE_TYPES, ...PROP_TYPES, "level", "erase"];
 
 export type EditorUi = {
   tool: EditorTool;
@@ -53,6 +64,12 @@ export type EditorUi = {
   hint: string | null;
   hintOk: boolean;
   preview: boolean;
+  /** Level for new pieces that do not join raised road. */
+  level: number;
+  /** New pieces are mirrored. */
+  flip: boolean;
+  /** The circuit differs from the one being driven (unsaved until Drive). */
+  dirty: boolean;
 };
 
 export type EditorHost = {
@@ -75,8 +92,18 @@ export class TrackEditor {
   private readonly history = new History();
   private tool: EditorTool = "straight";
   private rot: Rot = 0;
+  private level = 0;
+  private flip = false;
   private preview = false;
   private active = false;
+  /** The circuit as it was when the editor opened (revert target, unsaved-changes check). */
+  private base: TrackData;
+  private baseKey = "";
+  /** Level the ghost piece is currently built at. */
+  private ghostLevel = 0;
+  private readonly labels = new THREE.Group();
+  private readonly labelTextures = new Map<string, THREE.CanvasTexture>();
+  private readonly labelMats: THREE.SpriteMaterial[] = [];
 
   private readonly root = new THREE.Group();
   private readonly overlay = new THREE.Group();
@@ -121,6 +148,7 @@ export class TrackEditor {
   ) {
     this.track = track;
     this.layout = analyzeTrack(track);
+    this.base = track;
     this.grid = new THREE.GridHelper(CELL * 41, 41, "#ffffff", "#ffffff");
     // 41 divisions centred on the origin put the lines on cell edges (cells are centred on k·CELL).
     this.grid.position.set(0, 0.05, 0);
@@ -137,7 +165,7 @@ export class TrackEditor {
         depthWrite: false,
       }),
     );
-    this.root.add(this.grid, this.overlay);
+    this.root.add(this.grid, this.overlay, this.labels);
     this.root.visible = false;
     host.scene.add(this.root);
   }
@@ -147,6 +175,8 @@ export class TrackEditor {
   enable(track: TrackData) {
     this.track = track;
     this.layout = analyzeTrack(track);
+    this.base = cloneTrack(track);
+    this.baseKey = trackKey(track);
     this.history.clear();
     this.active = true;
     this.preview = false;
@@ -195,6 +225,8 @@ export class TrackEditor {
     this.issueMat.dispose();
     this.openMat.dispose();
     this.arrowMat.dispose();
+    for (const t of this.labelTextures.values()) t.dispose();
+    for (const m of this.labelMats) m.dispose();
     (this.ghostFootprint.material as THREE.Material).dispose();
   }
 
@@ -210,6 +242,51 @@ export class TrackEditor {
     this.rot = ((((this.rot + dir) % 4) + 4) % 4) as Rot;
     this.rebuildGhost();
     this.pushUi();
+  }
+
+  /** Level for new pieces placed away from raised road. */
+  setLevel(level: number) {
+    this.level = Math.max(0, Math.min(MAX_LEVEL, level));
+    this.updateGhost();
+    this.pushUi();
+  }
+
+  toggleFlip() {
+    this.flip = !this.flip;
+    this.rebuildGhost();
+    this.pushUi();
+  }
+
+  /** Mirror the whole circuit left ↔ right (undoable). */
+  mirror() {
+    this.apply({ ok: true, track: mirrorTrack(this.track), note: "Circuit mirrored" });
+  }
+
+  /** Back to the circuit as it was when the editor opened (undoable). */
+  revert() {
+    if (!this.dirty) return;
+    this.history.push(this.track);
+    this.setTrack(cloneTrack(this.base));
+    this.host.onNote("Changes discarded", "info");
+  }
+
+  get dirty() {
+    return trackKey(this.track) !== this.baseKey;
+  }
+
+  /** Eyedropper: the hovered piece becomes the current tool (type, rotation, flip, level). */
+  private pick() {
+    if (!this.hasHover) return;
+    const i = pieceAt(this.track, Math.round(this.hover.x / CELL), Math.round(this.hover.z / CELL));
+    const p = this.track.pieces[i];
+    if (!p) return;
+    this.tool = p.type;
+    this.rot = p.rot;
+    this.flip = !!p.flip;
+    this.level = pieceLevel(p);
+    this.rebuildGhost();
+    this.pushUi();
+    this.host.onNote(`Picked ${PIECES[p.type].label}`, "info");
   }
 
   undo() {
@@ -231,12 +308,14 @@ export class TrackEditor {
 
   rename(name: string) {
     this.track = { ...this.track, name };
+    this.pushUi();
   }
 
   setPreview(preview: boolean) {
     this.preview = preview;
     this.grid.visible = !preview;
     this.overlay.visible = !preview;
+    this.labels.visible = !preview;
     if (this.ghost) this.ghost.visible = !preview;
     this.pushUi();
   }
@@ -309,15 +388,31 @@ export class TrackEditor {
   private act(erase: boolean) {
     if (!this.hasHover || this.preview) return;
     const { x, z } = this.hover;
-    if (erase || this.tool === "erase") {
+    if (this.tool === "level") {
+      const lower = erase || this.keys.has("ShiftLeft") || this.keys.has("ShiftRight");
+      this.apply(
+        changeLevel(this.track, Math.round(x / CELL), Math.round(z / CELL), lower ? -1 : 1),
+      );
+    } else if (erase || this.tool === "erase") {
       this.apply(eraseAt(this.track, x, z));
     } else if (this.tool === "cone" || this.tool === "tires") {
       this.apply(placeProp(this.track, this.tool, x, z));
     } else {
+      const cx = Math.round(x / CELL);
+      const cz = Math.round(z / CELL);
       this.apply(
-        placePiece(this.track, this.tool, Math.round(x / CELL), Math.round(z / CELL), this.rot),
+        placePiece(this.track, this.tool, cx, cz, this.rot, {
+          y: this.placementLevel(this.tool, cx, cz),
+          flip: this.flip,
+        }),
       );
     }
+  }
+
+  /** Level a new piece gets at a cell: joins raised road next to it, else the chosen level. */
+  private placementLevel(type: PieceType, cx: number, cz: number): number {
+    const auto = autoLevel(this.track, makePiece(type, cx, cz, this.rot, { flip: this.flip }));
+    return auto ?? Math.min(this.level, MAX_LEVEL - PIECES[type].rise);
   }
 
   private pushUi() {
@@ -327,6 +422,9 @@ export class TrackEditor {
       canUndo: this.history.canUndo,
       canRedo: this.history.canRedo,
       preview: this.preview,
+      level: this.level,
+      flip: this.flip,
+      dirty: this.dirty,
     });
   }
 
@@ -348,7 +446,7 @@ export class TrackEditor {
     if (!this.active) return;
     const ghost = new THREE.Group();
     const tool = this.tool;
-    if (tool === "erase") {
+    if (tool === "erase" || tool === "level") {
       // Footprint highlight only.
     } else if (tool === "cone" || tool === "tires") {
       const models = this.host.models();
@@ -368,7 +466,7 @@ export class TrackEditor {
       const single: TrackData = {
         version: 1,
         name: "",
-        pieces: [{ type: tool, x: 0, z: 0, rot: this.rot }],
+        pieces: [makePiece(tool, 0, 0, this.rot, { y: this.ghostLevel, flip: this.flip })],
         props: [],
       };
       this.ghostTrack = buildTrack(single, analyzeTrack(single), null);
@@ -431,7 +529,24 @@ export class TrackEditor {
       }
     };
 
-    if (tool === "erase") {
+    if (tool === "level") {
+      ghost.position.set(0, 0, 0);
+      const piece = pieceAt(this.track, Math.round(x / CELL), Math.round(z / CELL));
+      const p = this.track.pieces[piece];
+      if (p) {
+        const level = pieceLevel(p);
+        const top = MAX_LEVEL - PIECES[p.type].rise;
+        hint =
+          level < top
+            ? `Raise ${PIECES[p.type].label} to level ${level + 1}` +
+              (level > 0 ? ` · right-click: lower to ${level - 1}` : "")
+            : `Top level · right-click: lower to ${level - 1}`;
+        footprint(footprintCells(p), GHOST_OK);
+      } else {
+        hint = "Click a piece to raise it, right-click (or Shift) to lower it";
+        ok = false;
+      }
+    } else if (tool === "erase") {
       ghost.position.set(0, 0, 0);
       const prop = propNear(this.track, x, z, 1.2);
       const piece = pieceAt(this.track, Math.round(x / CELL), Math.round(z / CELL));
@@ -454,14 +569,22 @@ export class TrackEditor {
     } else {
       const cx = Math.round(x / CELL);
       const cz = Math.round(z / CELL);
+      const level = this.placementLevel(tool, cx, cz);
+      if (level !== this.ghostLevel) {
+        // The ghost shows the piece at the height it will be placed (rebuilding re-enters here).
+        this.ghostLevel = level;
+        this.rebuildGhost();
+        return;
+      }
       ghost.position.set(cx * CELL, 0, cz * CELL);
-      const piece = { type: tool, x: cx, z: cz, rot: this.rot };
+      const piece = makePiece(tool, cx, cz, this.rot, { y: level, flip: this.flip });
       const check = checkPiecePlacement(this.track, piece);
       ok = check.ok;
+      const where = level > 0 || PIECES[tool].rise > 0 ? ` · level ${level}` : "";
       hint = check.ok
-        ? check.replaces !== null
-          ? `Replace with ${PIECES[tool].label}`
-          : `Place ${PIECES[tool].label}`
+        ? (check.replaces !== null
+            ? `Replace with ${PIECES[tool].label}`
+            : `Place ${PIECES[tool].label}`) + where
         : check.reason;
       footprint(footprintCells(piece), ok ? GHOST_OK : GHOST_BAD);
     }
@@ -490,7 +613,7 @@ export class TrackEditor {
       const m = new THREE.Mesh(this.openGeo, this.openMat);
       m.position.set(
         end.cell[0] * CELL + dx * (CELL / 2 - 1.2),
-        1.2,
+        1.2 + end.level * LEVEL_HEIGHT,
         end.cell[1] * CELL + dz * (CELL / 2 - 1.2),
       );
       m.rotation.y = Math.atan2(dx, dz);
@@ -501,9 +624,68 @@ export class TrackEditor {
     if (start) {
       const arrow = this.startArrow(start.rot);
       const c = toWorld(start, { x: 0, z: 0 });
-      arrow.position.set(c.x, 0, c.z);
+      arrow.position.set(c.x, pieceLevel(start) * LEVEL_HEIGHT, c.z);
       this.overlay.add(arrow);
     }
+    this.refreshLabels();
+  }
+
+  /**
+   * Elevation indicator: a tag over every raised piece ("2") and ramp ("1→2"), so heights read at
+   * a glance from the top-down view. Ramps on the circuit read in the race direction ("2→1" is a
+   * descent); others from their low end.
+   */
+  private refreshLabels() {
+    for (const child of [...this.labels.children]) this.labels.remove(child);
+    const reversed = new Map(this.layout.order.map((o) => [o.index, o.reversed]));
+    let used = 0;
+    for (const [index, p] of this.track.pieces.entries()) {
+      const rise = PIECES[p.type].rise;
+      const level = pieceLevel(p);
+      if (level === 0 && rise === 0) continue;
+      const text = !rise
+        ? `${level}`
+        : reversed.get(index)
+          ? `${level + rise}→${level}`
+          : `${level}→${level + rise}`;
+      let mat = this.labelMats[used];
+      if (!mat) {
+        mat = new THREE.SpriteMaterial({ depthTest: false, transparent: true });
+        this.labelMats.push(mat);
+      }
+      used++;
+      mat.map = this.labelTexture(text);
+      const sprite = new THREE.Sprite(mat);
+      const cells = footprintCells(p);
+      const cx = cells.reduce((a, c) => a + c[0], 0) / cells.length;
+      const cz = cells.reduce((a, c) => a + c[1], 0) / cells.length;
+      sprite.position.set(cx * CELL, (level + rise / 2) * LEVEL_HEIGHT + 2.5, cz * CELL);
+      sprite.scale.set(rise ? 6 : 3.6, 3, 1);
+      sprite.renderOrder = 5;
+      this.labels.add(sprite);
+    }
+  }
+
+  private labelTexture(text: string): THREE.CanvasTexture {
+    const cached = this.labelTextures.get(text);
+    if (cached) return cached;
+    const canvas = document.createElement("canvas");
+    canvas.width = text.length > 1 ? 128 : 76;
+    canvas.height = 64;
+    const ctx = canvas.getContext("2d")!;
+    ctx.fillStyle = "rgba(20, 24, 32, 0.78)";
+    ctx.beginPath();
+    ctx.roundRect(2, 2, canvas.width - 4, 60, 28);
+    ctx.fill();
+    ctx.fillStyle = "#ffd76a";
+    ctx.font = "bold 40px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, canvas.width / 2, 34);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    this.labelTextures.set(text, tex);
+    return tex;
   }
 
   // ─── Input ───────────────────────────────────────────────────────────────
@@ -618,7 +800,9 @@ export class TrackEditor {
     }
     if (mod || e.altKey) return;
     if (e.code.startsWith("Digit")) {
-      const tool = EDITOR_TOOLS[Number(e.code.slice(5)) - 1];
+      // 1–9, then 0 for the tenth tool.
+      const n = Number(e.code.slice(5));
+      const tool = EDITOR_TOOLS[(n === 0 ? 10 : n) - 1];
       if (tool) this.setTool(tool);
       return;
     }
@@ -627,6 +811,31 @@ export class TrackEditor {
       case "KeyQ":
       case "KeyE":
         this.rotate(e.shiftKey || e.code === "KeyQ" ? -1 : 1);
+        break;
+      case "KeyF":
+        this.toggleFlip();
+        break;
+      case "KeyI":
+        this.pick();
+        break;
+      case "KeyH":
+        this.setTool("level");
+        break;
+      case "Equal":
+      case "NumpadAdd":
+      case "PageUp":
+        e.preventDefault();
+        this.setLevel(this.level + 1);
+        break;
+      case "Minus":
+      case "NumpadSubtract":
+      case "PageDown":
+        e.preventDefault();
+        this.setLevel(this.level - 1);
+        break;
+      case "ShiftLeft":
+      case "ShiftRight":
+        this.keys.add(e.code);
         break;
       case "KeyX":
       case "Delete":
@@ -653,4 +862,9 @@ export class TrackEditor {
   private readonly onKeyUp = (e: KeyboardEvent) => {
     this.keys.delete(e.code);
   };
+}
+
+/** Comparable snapshot of what the editor changes (name, pieces, props). */
+function trackKey(t: TrackData): string {
+  return JSON.stringify([t.name, t.pieces, t.props]);
 }

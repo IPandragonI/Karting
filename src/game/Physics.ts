@@ -12,6 +12,7 @@ import {
   registerAll,
   rigidBody,
   sphere,
+  staticCompound,
   updateWorld,
   type Listener,
   type RigidBody,
@@ -23,11 +24,21 @@ import {
 // restricted to translation so the arcade model alone decides its heading.
 
 export const KART_RADIUS = 0.7;
-const GRAVITY = 20;
+export const GRAVITY = 20;
 
 let registered = false;
 
-export type WallSegment = { x1: number; z1: number; x2: number; z2: number };
+/** A wall along a segment; `y1`/`y2` are the heights of its base at each end (default 0). */
+export type WallSegment = {
+  x1: number;
+  z1: number;
+  x2: number;
+  z2: number;
+  y1?: number;
+  y2?: number;
+  /** Wall height override (retaining walls under raised road). */
+  height?: number;
+};
 
 export class Physics {
   readonly world: World;
@@ -92,19 +103,43 @@ export class Physics {
     };
   }
 
-  addWall(seg: WallSegment, halfThickness: number, height = 1.4) {
-    const dx = seg.x2 - seg.x1;
-    const dz = seg.z2 - seg.z1;
-    const len = Math.hypot(dx, dz);
-    if (len < 1e-4) return;
-    // Box local +Z runs along the segment; rotate around Y by atan2(dx, dz).
-    const angle = Math.atan2(dx, dz);
+  /**
+   * All walls go into a single static body with a static-compound shape (crashcat builds a BVH
+   * over the boxes). A body per wall segment cost ~0.4–0.8 ms per physics step in broadphase
+   * bookkeeping alone; one compound body costs almost nothing extra.
+   */
+  addWalls(walls: { seg: WallSegment; halfThickness: number; height: number }[]) {
+    const children = [];
+    for (const { seg, halfThickness, height } of walls) {
+      const dx = seg.x2 - seg.x1;
+      const dz = seg.z2 - seg.z1;
+      const y1 = seg.y1 ?? 0;
+      const y2 = seg.y2 ?? 0;
+      const flat = Math.hypot(dx, dz);
+      if (flat < 1e-4) continue;
+      const len = Math.hypot(flat, y2 - y1);
+      // Box local +Z runs along the segment: yaw around Y by atan2(dx, dz), then pitch around the
+      // box's X axis so it follows a slope (a positive X rotation tips +Z downwards).
+      const yaw = Math.atan2(dx, dz) / 2;
+      const pitch = -Math.atan2(y2 - y1, flat) / 2;
+      const [sy, cy, sp, cp] = [Math.sin(yaw), Math.cos(yaw), Math.sin(pitch), Math.cos(pitch)];
+      children.push({
+        shape: box.create({ halfExtents: [halfThickness, height / 2, len / 2 + 0.05] }),
+        position: [(seg.x1 + seg.x2) / 2, (y1 + y2) / 2 + height / 2, (seg.z1 + seg.z2) / 2] as [
+          number,
+          number,
+          number,
+        ],
+        // q_yaw · q_pitch
+        quaternion: [cy * sp, sy * cp, -sy * sp, cy * cp] as [number, number, number, number],
+      });
+    }
+    if (children.length === 0) return;
     rigidBody.create(this.world, {
-      shape: box.create({ halfExtents: [halfThickness, height / 2, len / 2 + 0.05] }),
+      shape: staticCompound.create({ children }),
       motionType: MotionType.STATIC,
       objectLayer: this.staticLayer,
-      position: [(seg.x1 + seg.x2) / 2, height / 2, (seg.z1 + seg.z2) / 2],
-      quaternion: [0, Math.sin(angle / 2), 0, Math.cos(angle / 2)],
+      position: [0, 0, 0],
       friction: 0,
       restitution: 0.3,
     });
@@ -141,12 +176,18 @@ export class Physics {
     updateWorld(this.world, this.listener, dt);
   }
 
+  /** Lifts the kart back onto the surface (ground following; see Game.fixedStep). */
+  setKartHeight(y: number) {
+    const p = this.kart.position;
+    rigidBody.setPosition(this.world, this.kart, [p[0], y, p[2]], false);
+  }
+
   setKartVelocity(vx: number, vy: number, vz: number) {
     rigidBody.setLinearVelocity(this.world, this.kart, [vx, vy, vz]);
   }
 
-  teleportKart(x: number, z: number) {
-    rigidBody.setPosition(this.world, this.kart, [x, KART_RADIUS, z], true);
+  teleportKart(x: number, z: number, ground = 0) {
+    rigidBody.setPosition(this.world, this.kart, [x, ground + KART_RADIUS, z], true);
     rigidBody.setLinearVelocity(this.world, this.kart, [0, 0, 0]);
   }
 }

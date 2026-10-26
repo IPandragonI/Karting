@@ -7,7 +7,11 @@ import {
   Eye,
   EyeOff,
   Flag,
-  Home,
+  FlipHorizontal2,
+  History,
+  Minus,
+  MoveVertical,
+  Plus,
   Redo2,
   RotateCcw,
   RotateCw,
@@ -17,6 +21,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { createDefaultTrack } from "@/game/track/defaultTrack";
+import { MAX_LEVEL } from "@/game/track/pieces";
 import type { EditorTool } from "@/game/TrackEditor";
 import { ShareDialog } from "./ShareDialog";
 import { useGame, useGameState } from "./useGame";
@@ -42,8 +47,22 @@ const TOOLS: { tool: EditorTool; label: string; key: string; icon: React.ReactNo
     key: "5",
     icon: <PieceIcon d="M5 22V12a7 7 0 0 1 14 0v10" />,
   },
-  { tool: "cone", label: "Cone", key: "6", icon: <ConeIcon /> },
-  { tool: "tires", label: "Tire stack", key: "7", icon: <TiresIcon /> },
+  { tool: "ramp", label: "Ramp: up one level (rotate to go down)", key: "6", icon: <RampIcon /> },
+  { tool: "longRamp", label: "Long ramp (2 cells, gentle)", key: "7", icon: <RampIcon long /> },
+  {
+    tool: "chicane",
+    label: "Chicane (2×2, F flips)",
+    key: "8",
+    icon: <PieceIcon d="M7 22v-4c0-6 10-6 10-12V2" />,
+  },
+  { tool: "cone", label: "Cone", key: "9", icon: <ConeIcon /> },
+  { tool: "tires", label: "Tire stack", key: "0", icon: <TiresIcon /> },
+  {
+    tool: "level",
+    label: "Height: click raises a piece, right-click lowers",
+    key: "H",
+    icon: <MoveVertical className="size-5" />,
+  },
   { tool: "erase", label: "Erase", key: "X", icon: <Eraser className="size-5" /> },
 ];
 
@@ -59,21 +78,17 @@ export function EditorToolbar() {
 
   const errors = issues.filter((i) => i.severity === "error");
   const warnings = issues.filter((i) => i.severity === "warning");
-  const rotatable = editor.tool !== "cone" && editor.tool !== "tires" && editor.tool !== "erase";
+  const rotatable =
+    editor.tool !== "cone" &&
+    editor.tool !== "tires" &&
+    editor.tool !== "erase" &&
+    editor.tool !== "level";
 
   return (
     <div className="pointer-events-none absolute inset-0 flex flex-col justify-between gap-2 p-2 sm:p-3">
       {/* Top bar: name, status, test drive. */}
       <div className="pointer-events-auto flex flex-wrap items-start gap-2">
         <div className="glass-panel flex items-center gap-2 rounded-box p-1.5">
-          <button
-            className="btn btn-square btn-ghost btn-sm"
-            onClick={() => game.closeEditor("menu")}
-            title="Back to menu"
-            aria-label="Back to menu"
-          >
-            <Home className="size-4" />
-          </button>
           <label className="sr-only" htmlFor="track-name">
             Track name
           </label>
@@ -121,19 +136,35 @@ export function EditorToolbar() {
           )}
         </div>
 
-        <div className="ml-auto flex gap-2">
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+          {editor.dirty && (
+            <div className="glass-panel flex items-center gap-1 rounded-box py-1 pr-1 pl-2.5 text-xs font-bold">
+              <span className="size-2 rounded-full bg-warning" aria-hidden />
+              Unsaved changes
+              <button
+                className="btn btn-ghost btn-xs"
+                onClick={() => game.editorRevert()}
+                title="Discard the changes made since opening the editor (undoable)"
+              >
+                <History className="size-3.5" /> Revert
+              </button>
+            </div>
+          )}
           <button className="glass-panel btn rounded-box btn-sm" onClick={() => setShare(true)}>
             Share
           </button>
           <div className="glass-panel join rounded-box">
             <button
               className="btn join-item btn-primary btn-sm"
-              onClick={() => game.closeEditor(raceable ? "trial" : "free")}
+              onClick={() => game.closeEditor()}
               title={
-                raceable ? "Time trial on this track" : "Free drive (the circuit is not complete)"
+                (raceable
+                  ? "Back to driving, with lap timing on this circuit"
+                  : "Back to driving (free drive: the circuit is not complete)") +
+                (editor.dirty ? ". Saves the changes; records restart if the layout changed" : "")
               }
             >
-              {raceable ? <Timer className="size-4" /> : <Flag className="size-4" />} Test drive
+              {raceable ? <Timer className="size-4" /> : <Flag className="size-4" />} Drive
             </button>
           </div>
         </div>
@@ -197,6 +228,50 @@ export function EditorToolbar() {
                 />
               </button>
             </div>
+            <div className="tooltip tooltip-top" data-tip="Flip left ↔ right (F)">
+              <button
+                className={`btn btn-square btn-sm sm:btn-md ${editor.flip ? "btn-secondary" : "btn-ghost"}`}
+                onClick={() => game.editorFlip()}
+                disabled={!rotatable}
+                aria-label="Flip piece"
+                aria-pressed={editor.flip}
+              >
+                <FlipHorizontal2 className="size-5" />
+              </button>
+            </div>
+            <div
+              className="flex items-center rounded-field border border-base-content/15"
+              role="group"
+              aria-label="Level for new pieces"
+            >
+              <div className="tooltip tooltip-top" data-tip="Lower (−)">
+                <button
+                  className="btn btn-square btn-ghost btn-xs sm:btn-sm"
+                  onClick={() => game.editorLevel(editor.level - 1)}
+                  disabled={editor.level <= 0}
+                  aria-label="Lower the level for new pieces"
+                >
+                  <Minus className="size-4" />
+                </button>
+              </div>
+              <span
+                className="min-w-12 text-center text-xs leading-tight font-bold tabular-nums"
+                title="Level for new pieces (they join raised road at its level automatically)"
+              >
+                <span className="block text-[10px] font-normal opacity-60">Level</span>
+                {editor.level}
+              </span>
+              <div className="tooltip tooltip-top" data-tip="Raise (+)">
+                <button
+                  className="btn btn-square btn-ghost btn-xs sm:btn-sm"
+                  onClick={() => game.editorLevel(editor.level + 1)}
+                  disabled={editor.level >= MAX_LEVEL}
+                  aria-label="Raise the level for new pieces"
+                >
+                  <Plus className="size-4" />
+                </button>
+              </div>
+            </div>
             <div className="tooltip tooltip-top" data-tip="Undo (Ctrl+Z)">
               <button
                 className="btn btn-square btn-ghost btn-sm sm:btn-md"
@@ -245,6 +320,16 @@ export function EditorToolbar() {
                 className="menu dropdown-content z-10 mb-2 w-56 rounded-box bg-base-100 p-2 shadow-xl"
               >
                 <li>
+                  <button onClick={() => game.editorMirror()}>
+                    <FlipHorizontal2 className="size-4" /> Mirror the circuit
+                  </button>
+                </li>
+                <li>
+                  <button onClick={() => game.editorRevert()} disabled={!editor.dirty}>
+                    <History className="size-4" /> Revert unsaved changes
+                  </button>
+                </li>
+                <li>
                   <button onClick={() => game.editorReplace(createDefaultTrack())}>
                     <RotateCcw className="size-4" /> Reset to default circuit
                   </button>
@@ -264,8 +349,8 @@ export function EditorToolbar() {
         </div>
 
         <p className="hud-text pointer-events-none hidden text-center text-xs opacity-70 sm:block [@media(pointer:coarse)]:hidden">
-          Click to place · Right-click to erase · Drag to pan · Scroll to zoom · Arrow keys move the
-          view
+          Click to place · Right-click to erase · R rotate · F flip · + / − level · I pick up a
+          piece · Drag to pan · Scroll to zoom
         </p>
         <p className="hud-text pointer-events-none hidden text-center text-xs opacity-70 [@media(pointer:coarse)]:block">
           Tap to place · Drag to pan · Pinch to zoom · Use the eraser to remove
@@ -300,6 +385,20 @@ function StartIcon() {
         <rect key={i} x={4 + i * 4} y={i % 2 ? 9 : 11} width={4} height={2} fill="currentColor" />
       ))}
       <path d="M12 2l-4 5h8z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function RampIcon({ long = false }: { long?: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" className="size-5" aria-hidden>
+      <path
+        d={long ? "M2 20h3L19 9h3" : "M4 20h3l10-12h3"}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={3.5}
+      />
+      <path d="M2 22h20" stroke="currentColor" strokeWidth={1.5} opacity={0.5} />
     </svg>
   );
 }

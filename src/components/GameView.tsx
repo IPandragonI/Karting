@@ -4,10 +4,9 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Game } from "@/game/Game";
 import { EditorToolbar } from "./EditorToolbar";
 import { GameContext } from "./useGame";
-import { FinishPanel } from "./FinishPanel";
 import { Hud } from "./Hud";
+import { PerfOverlay } from "./PerfOverlay";
 import { LoadingScreen } from "./LoadingScreen";
-import { MainMenu } from "./MainMenu";
 import { PauseMenu } from "./PauseMenu";
 
 export function GameView() {
@@ -51,25 +50,22 @@ function Overlays({ game }: { game: Game }) {
           </div>
         </div>
       );
-    case "menu":
-      return <MainMenu />;
     case "paused":
       return (
         <>
           <Hud />
           <PauseMenu />
+          <PerfOverlay />
         </>
       );
     case "editor":
       return <EditorToolbar />;
-    case "finished":
+    default:
       return (
         <>
           <Hud />
-          <FinishPanel />
+          <PerfOverlay />
         </>
       );
-    default:
-      return <Hud />;
   }
 }

@@ -1,21 +1,34 @@
-import { CELL, PIECE_TYPES, PROP_TYPES, type PieceType, type PropType, type Rot } from "./pieces";
+import {
+  CELL,
+  MAX_LEVEL,
+  PIECE_TYPES,
+  PROP_TYPES,
+  type PieceType,
+  type PropType,
+  type Rot,
+} from "./pieces";
 import { analyzeTrack, GRID_LIMIT, MAX_PIECES, MAX_PROPS, type TrackData } from "./Track";
 
 // Versioned track formats. Only plain track data is ever serialized: piece types, grid cells,
 // rotations and prop positions. Nothing executable, no three.js objects.
 //
 // 1. JSON (export / import, human-readable):
-//    { "format": "low-poly-karting", "version": 1, "name": "…",
-//      "pieces": [["straight", 0, 1, 0], …], "props": [["cone", 4.5, -2, 0], …] }
+//    { "format": "low-poly-karting", "version": 2, "name": "…",
+//      "pieces": [["straight", 0, 1, 0], ["ramp", 0, 2, 0, 1, 1], …],
+//      "props": [["cone", 4.5, -2, 0], …] }
+//    A piece is [type, x, z, rot, level?, flipped?]; level and flip are omitted when 0.
 //
 // 2. URL (share links, compact binary → base64url), stored in the URL fragment (#track=…)
 //    so it never reaches a server:
-//    u8 version | u8 name length | name (UTF-8) | u16 piece count | pieces × 3 bytes
-//    (x + 128, z + 128, type << 2 | rot) | u16 prop count | props × 5 bytes
+//    u8 version | u8 name length | name (UTF-8) | u16 piece count | pieces × 4 bytes
+//    (x + 128, z + 128, type << 2 | rot, flip << 7 | level) | u16 prop count | props × 5 bytes
 //    (type << 2 | rot, i16 x × 2, i16 z × 2).
+//
+// Version 1 (no elevation: 3-byte pieces without the last byte) is still read, and still
+// written for flat circuits, so their links stay short and unchanged.
 
 export const FORMAT = "low-poly-karting";
-export const VERSION = 1;
+export const VERSION = 2;
 const MAX_NAME = 32;
 /** Above this many characters, sharing suggests the JSON export instead. */
 export const MAX_URL_PARAM = 6000;
@@ -50,7 +63,7 @@ export function validateTrack(raw: {
   for (const [i, p] of raw.pieces.entries()) {
     if (!Array.isArray(p) || p.length < 4)
       return { ok: false, error: `Piece ${i + 1} is malformed` };
-    const [type, x, z, rot] = p as unknown[];
+    const [type, x, z, rot, y = 0, flip = 0] = p as unknown[];
     if (!PIECE_TYPES.includes(type as PieceType))
       return { ok: false, error: `Piece ${i + 1} has an unknown type` };
     if (!isInt(x) || !isInt(z) || Math.abs(x) > GRID_LIMIT || Math.abs(z) > GRID_LIMIT) {
@@ -58,7 +71,14 @@ export function validateTrack(raw: {
     }
     if (!isInt(rot) || rot < 0 || rot > 3)
       return { ok: false, error: `Piece ${i + 1} has an invalid rotation` };
-    track.pieces.push({ type: type as PieceType, x, z, rot: rot as Rot });
+    if (!isInt(y) || y < 0 || y > MAX_LEVEL)
+      return { ok: false, error: `Piece ${i + 1} has an invalid level` };
+    if (flip !== 0 && flip !== 1 && flip !== true && flip !== false)
+      return { ok: false, error: `Piece ${i + 1} is malformed` };
+    const piece: TrackData["pieces"][number] = { type: type as PieceType, x, z, rot: rot as Rot };
+    if (y) piece.y = y;
+    if (flip) piece.flip = true;
+    track.pieces.push(piece);
   }
   const limit = (GRID_LIMIT + 0.5) * CELL;
   for (const [i, p] of props.entries()) {
@@ -93,7 +113,12 @@ export function toJson(track: TrackData): string {
       format: FORMAT,
       version: VERSION,
       name: track.name,
-      pieces: track.pieces.map((p) => [p.type, p.x, p.z, p.rot]),
+      pieces: track.pieces.map((p) => {
+        const out: (string | number)[] = [p.type, p.x, p.z, p.rot];
+        if (p.y || p.flip) out.push(p.y ?? 0);
+        if (p.flip) out.push(1);
+        return out;
+      }),
       props: track.props.map((p) => [p.type, p.x, p.z, p.rot]),
     },
     null,
@@ -113,7 +138,7 @@ export function fromJson(text: string): ParseResult {
     return { ok: false, error: "Not a track file" };
   const o = data as Record<string, unknown>;
   if (o.format !== FORMAT) return { ok: false, error: "Not a Low-Poly Karting track" };
-  if (o.version !== VERSION)
+  if (o.version !== 1 && o.version !== VERSION)
     return { ok: false, error: `Unsupported track version ${String(o.version)}` };
   return validateTrack({ name: o.name, pieces: o.pieces, props: o.props });
 }
@@ -122,11 +147,14 @@ export function fromJson(text: string): ParseResult {
 
 export function encodeTrack(track: TrackData): string {
   const name = new TextEncoder().encode(track.name.slice(0, MAX_NAME)).slice(0, 96);
-  const size = 2 + name.length + 2 + track.pieces.length * 3 + 2 + track.props.length * 5;
+  // Flat, unflipped circuits keep the shorter version 1 layout (and their old links).
+  const version = track.pieces.some((p) => p.y || p.flip) ? VERSION : 1;
+  const pieceBytes = version === 1 ? 3 : 4;
+  const size = 2 + name.length + 2 + track.pieces.length * pieceBytes + 2 + track.props.length * 5;
   const bytes = new Uint8Array(size);
   const view = new DataView(bytes.buffer);
   let o = 0;
-  bytes[o++] = VERSION;
+  bytes[o++] = version;
   bytes[o++] = name.length;
   bytes.set(name, o);
   o += name.length;
@@ -136,6 +164,7 @@ export function encodeTrack(track: TrackData): string {
     bytes[o++] = p.x + 128;
     bytes[o++] = p.z + 128;
     bytes[o++] = (PIECE_TYPES.indexOf(p.type) << 2) | p.rot;
+    if (pieceBytes === 4) bytes[o++] = ((p.flip ? 1 : 0) << 7) | (p.y ?? 0);
   }
   view.setUint16(o, track.props.length);
   o += 2;
@@ -164,7 +193,9 @@ export function decodeTrack(param: string): ParseResult {
   try {
     need(2);
     const version = bytes[o++]!;
-    if (version !== VERSION) return { ok: false, error: `Unsupported track version ${version}` };
+    if (version !== 1 && version !== VERSION)
+      return { ok: false, error: `Unsupported track version ${version}` };
+    const pieceBytes = version === 1 ? 3 : 4;
     const nameLen = bytes[o++]!;
     need(nameLen);
     const name = new TextDecoder().decode(bytes.subarray(o, o + nameLen));
@@ -175,11 +206,12 @@ export function decodeTrack(param: string): ParseResult {
     if (pieceCount > MAX_PIECES) return { ok: false, error: "Too many pieces" };
     const pieces: unknown[] = [];
     for (let i = 0; i < pieceCount; i++) {
-      need(3);
+      need(pieceBytes);
       const x = bytes[o++]! - 128;
       const z = bytes[o++]! - 128;
       const packed = bytes[o++]!;
-      pieces.push([PIECE_TYPES[packed >> 2] ?? "?", x, z, packed & 3]);
+      const extra = pieceBytes === 4 ? bytes[o++]! : 0;
+      pieces.push([PIECE_TYPES[packed >> 2] ?? "?", x, z, packed & 3, extra & 0x7f, extra >> 7]);
     }
     need(2);
     const propCount = view.getUint16(o);
