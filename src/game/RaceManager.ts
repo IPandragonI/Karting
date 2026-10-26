@@ -118,6 +118,11 @@ export class RaceManager {
     this.sectors = [];
   }
 
+  /** A valid lap is being timed (not voided by reversing over the line). */
+  get timingLap() {
+    return this.phase === "timing" && this.sector >= 0;
+  }
+
   tick(dt: number) {
     if (this.phase === "timing") this.lapTime += dt;
   }

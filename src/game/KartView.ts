@@ -1,15 +1,57 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
+import { VEHICLE } from "./assets";
 import type { KartState } from "./Vehicle";
 
-// Visual kart: the Kenney kart chassis animated from the arcade model's state, with a small
-// procedural driver in the livery colours (the Car Kit character's oversized round head read as a
-// placeholder ball from the chase cameras). Wheels spin with forward speed, front wheels steer
-// (and counter-steer in a drift), the body rolls with lateral load and pitches under
-// acceleration and braking, and the driver leans into corners.
+// Visual kart: the Car Kit single-seater (VEHICLE in assets.ts) animated from the arcade model's
+// state, with a small procedural driver in the livery colours seated in its cockpit. Wheels spin
+// with forward speed, front wheels steer (and counter-steer in a drift), the body rolls with
+// lateral load and pitches under acceleration and braking, and the driver leans into corners.
 
-export const KART_SCALE = 1.25;
-const WHEEL_RADIUS = 0.21 * KART_SCALE;
+/** The driver is modelled in these units (metres = units × DRIVER_UNITS). */
+const DRIVER_UNITS = 1;
+/** Driver-model point at the centre of the helmet (see buildDriver). */
+const HELMET = { y: 0.79, z: -0.13 };
+/** Cockpit deck height in car-model units: the driver's lean pivots here. */
+const SEAT_Y = 0.49;
+
+/**
+ * The car's palette texture with its red swatches (the bodywork) repainted in a livery colour,
+ * keeping each swatch's shading. Other colours (tyres, metal, number panels) are untouched.
+ */
+function liveryTexture(source: THREE.Texture | null, livery: string): THREE.Texture | null {
+  const image = source?.image as CanvasImageSource & { width: number; height: number };
+  if (!source || !image?.width) return source;
+  const canvas = document.createElement("canvas");
+  canvas.width = image.width;
+  canvas.height = image.height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+  ctx.drawImage(image, 0, 0);
+  const data = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const px = data.data;
+  const c = new THREE.Color(livery);
+  const [lr, lg, lb] = [c.r * 255, c.g * 255, c.b * 255];
+  for (let i = 0; i < px.length; i += 4) {
+    const r = px[i]!;
+    const g = px[i + 1]!;
+    const b = px[i + 2]!;
+    if (r > 110 && r > g * 1.7 && r > b * 1.7) {
+      const shade = Math.min(1.2, r / 225);
+      px[i] = Math.min(255, lr * shade);
+      px[i + 1] = Math.min(255, lg * shade);
+      px[i + 2] = Math.min(255, lb * shade);
+    }
+  }
+  ctx.putImageData(data, 0, 0);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.flipY = source.flipY;
+  tex.colorSpace = source.colorSpace;
+  tex.magFilter = source.magFilter;
+  tex.minFilter = source.minFilter;
+  tex.wrapS = source.wrapS;
+  tex.wrapT = source.wrapT;
+  return tex;
+}
 
 export class KartView {
   readonly root = new THREE.Group();
@@ -25,16 +67,20 @@ export class KartView {
   slope = 0;
   private accel = 0;
   private wheelSpin = 0;
+  private wheelRadius = 0.25;
+  private readonly lean = new THREE.Group();
   private blob: THREE.Mesh;
-  private readonly owned: { geometries: THREE.BufferGeometry[]; materials: THREE.Material[] } = {
-    geometries: [],
-    materials: [],
-  };
+  private readonly owned: {
+    geometries: THREE.BufferGeometry[];
+    materials: THREE.Material[];
+    textures: THREE.Texture[];
+  } = { geometries: [], materials: [], textures: [] };
 
   constructor(model: THREE.Group, livery: string) {
     const kart = model.clone(true);
-    kart.scale.setScalar(KART_SCALE);
-    let tinted = false;
+    kart.scale.setScalar(VEHICLE.scale);
+    // One material for the whole car (the kit shares a palette texture), repainted per livery.
+    let material: THREE.MeshStandardMaterial | null = null;
     kart.traverse((o) => {
       const name = o.name.toLowerCase();
       const mesh = o as THREE.Mesh;
@@ -42,22 +88,33 @@ export class KartView {
         o.visible = false;
         return;
       }
-      // The chassis mesh is named after the model ("kart-oobi_1"); tint only that one.
-      if (mesh.isMesh && name.startsWith("kart-") && !tinted) {
-        const mat = (mesh.material as THREE.MeshStandardMaterial).clone();
-        mat.color.set(livery);
-        mesh.material = mat;
-        this.owned.materials.push(mat);
-        tinted = true;
+      if (mesh.isMesh) {
+        if (!material) {
+          material = (mesh.material as THREE.MeshStandardMaterial).clone();
+          material.map = liveryTexture(material.map, livery);
+          this.owned.materials.push(material);
+          if (material.map) this.owned.textures.push(material.map);
+        }
+        mesh.material = material;
       }
       if (!name.startsWith("wheel")) return;
       o.rotation.order = "YXZ";
       this.wheels.push(o);
+      // Wheel pivots sit at the axle: their height is the wheel radius.
+      this.wheelRadius = o.position.y * VEHICLE.scale;
       if (name.includes("front")) this.frontWheels.push(o);
-      if (name.includes("back")) this.rearLocal.push(o.position.clone().multiplyScalar(KART_SCALE));
+      if (name.includes("back"))
+        this.rearLocal.push(o.position.clone().multiplyScalar(VEHICLE.scale));
     });
+    // The driver keeps its real size whatever the car's scale, helmet at the cockpit point; the
+    // lean pivot sits at seat level so leaning tilts the shoulders, not the whole figure.
     this.driver = this.buildDriver(livery);
-    kart.add(this.driver);
+    const k = DRIVER_UNITS / VEHICLE.scale;
+    this.driver.scale.setScalar(k);
+    this.driver.position.set(0, VEHICLE.helmet.y - SEAT_Y - HELMET.y * k, -HELMET.z * k);
+    this.lean.position.set(0, SEAT_Y, VEHICLE.helmet.z);
+    this.lean.add(this.driver);
+    kart.add(this.lean);
     this.body.add(kart);
     this.root.add(this.body);
 
@@ -233,9 +290,9 @@ export class KartView {
     this.pitch += (THREE.MathUtils.clamp(-this.accel * 0.003, -0.06, 0.06) - this.pitch) * k;
     this.body.rotation.set(this.pitch, 0, this.roll, "YXZ");
     // The driver leans into the corner a little more than the chassis rolls out of it.
-    this.driver.rotation.z = -this.roll * 1.6;
+    this.lean.rotation.z = -this.roll * 1.6;
 
-    this.wheelSpin += (state.forwardSpeed / WHEEL_RADIUS) * dt;
+    this.wheelSpin += (state.forwardSpeed / this.wheelRadius) * dt;
     for (const w of this.wheels) w.rotation.x = this.wheelSpin;
     // Front wheels follow steering; in a drift they point where the kart is going (counter-steer).
     let steer = -state.steer * 0.45;
@@ -254,6 +311,7 @@ export class KartView {
   dispose() {
     for (const g of this.owned.geometries) g.dispose();
     for (const m of this.owned.materials) m.dispose();
+    for (const t of this.owned.textures) t.dispose();
     this.blob.geometry.dispose();
     const mat = this.blob.material as THREE.MeshBasicMaterial;
     mat.map?.dispose();

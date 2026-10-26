@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildReference,
   decodeGhost,
+  referenceTime,
   encodeGhost,
   GHOST_RATE,
   GhostRecorder,
@@ -107,5 +109,26 @@ describe("ghost", () => {
     expect(decodeGhost("{")).toBeNull();
     expect(decodeGhost(JSON.stringify({ v: 1, time: 12, step: 0.05, data: "AAAA" }))).toBeNull();
     expect(decodeGhost(text.replace('"time":12', '"time":99'))).toBeNull();
+  });
+
+  it("compares the live lap by position on the route, not by elapsed time", () => {
+    // Reference lap on a 300 m route: slow first half (10 m/s), fast second half (20 m/s).
+    const L = 300;
+    const pos = (t: number) => (t <= 15 ? t * 10 : 150 + (t - 15) * 20);
+    const r = new GhostRecorder();
+    r.begin(-DT, 0, 0, L - 0.1, 0); // a hair before the line
+    for (let t = DT; t < 22.5 + DT; t += DT) r.push(t, 0, 0, pos(Math.min(t, 22.5)), 0);
+    const lap = r.finish(22.5)!;
+    const progressAt = (_x: number, _y: number, z: number) => ((z % L) + L) % L;
+    const ref = buildReference(lap, L, progressAt)!;
+    expect(ref.progress[0]).toBe(0);
+    for (let k = 1; k < ref.progress.length; k++)
+      expect(ref.progress[k]!).toBeGreaterThanOrEqual(ref.progress[k - 1]!);
+    expect(referenceTime(ref, 100)).toBeCloseTo(10, 1);
+    expect(referenceTime(ref, 250)).toBeCloseTo(20, 1);
+    // A kart at 100 m after 9.8 s is 0.2 s ahead, although the reference lap is 22.5 s long.
+    expect(9.8 - referenceTime(ref, 100)).toBeCloseTo(-0.2, 1);
+    expect(referenceTime(ref, -5)).toBe(0);
+    expect(referenceTime(ref, 1e9)).toBe(22.5);
   });
 });

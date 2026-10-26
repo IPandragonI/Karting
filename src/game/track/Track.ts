@@ -60,6 +60,25 @@ export function footprintCells(p: PieceData): [number, number][] {
 /** Elevation level of a piece at connector A. */
 export const pieceLevel = (p: PieceData) => p.y ?? 0;
 
+/** Lowest and highest level a piece occupies (a ramp spans its two ends). */
+export function levelRange(p: PieceData): [number, number] {
+  const lo = pieceLevel(p);
+  return [lo, lo + PIECES[p.type].rise];
+}
+
+/**
+ * Two pieces can share a grid cell when a full level lies between them (one passes over the
+ * other: a bridge, an overpass). Closer than that, they would intersect.
+ */
+export function levelsClear(a: PieceData, b: PieceData): boolean {
+  const [alo, ahi] = levelRange(a);
+  const [blo, bhi] = levelRange(b);
+  return ahi + 1 <= blo || bhi + 1 <= alo;
+}
+
+/** Thickness of a raised deck where it passes over another road (its underside). */
+export const DECK_DEPTH = 0.35;
+
 export type WorldConnector = {
   /** Cell the road leaves from. */
   cell: [number, number];
@@ -134,8 +153,8 @@ export type OrderedPiece = {
 };
 
 export type TrackLayout = {
-  /** Map from cell key to piece index. */
-  occupancy: Map<string, number>;
+  /** Map from cell key to the pieces covering it (several when roads pass over each other). */
+  occupancy: Map<string, number[]>;
   startIndex: number;
   /** Pieces in race order starting at the start piece (only when the loop is closed). */
   order: OrderedPiece[];
@@ -150,7 +169,7 @@ export type TrackLayout = {
  */
 export function analyzeTrack(track: TrackData): TrackLayout {
   const issues: Issue[] = [];
-  const occupancy = new Map<string, number>();
+  const occupancy = new Map<string, number[]>();
   const overlapping = new Set<string>();
 
   track.pieces.forEach((p, i) => {
@@ -163,14 +182,20 @@ export function analyzeTrack(track: TrackData): TrackLayout {
           cells: [[cx, cz]],
         });
       }
-      if (occupancy.has(key)) overlapping.add(key);
-      else occupancy.set(key, i);
+      const list = occupancy.get(key);
+      if (!list) {
+        occupancy.set(key, [i]);
+        continue;
+      }
+      // Sharing a cell is fine with a full level of clearance (a bridge over a road).
+      if (list.some((j) => !levelsClear(track.pieces[j]!, p))) overlapping.add(key);
+      list.push(i);
     }
   });
   if (overlapping.size > 0) {
     issues.push({
       severity: "error",
-      message: `${overlapping.size} overlapping cell${overlapping.size > 1 ? "s" : ""}`,
+      message: `${overlapping.size} overlapping cell${overlapping.size > 1 ? "s" : ""} (pieces sharing a cell need a level between them)`,
       cells: [...overlapping].map((k) => k.split(",").map(Number) as [number, number]),
     });
   }
@@ -200,9 +225,15 @@ export function analyzeTrack(track: TrackData): TrackLayout {
         steps.push(c.cell);
         openEnds.push(c);
       } else if (match === null) {
+        // A road only runs "into the side" of a piece at its own height; one passing above or
+        // below is not in the way.
         const [dx, dz] = DIR_VEC[c.dir];
-        const neighbour = occupancy.get(cellKey(c.cell[0] + dx, c.cell[1] + dz));
-        if (neighbour !== undefined) blocked.push(c.cell);
+        const neighbours = occupancy.get(cellKey(c.cell[0] + dx, c.cell[1] + dz)) ?? [];
+        const inTheWay = neighbours.some((j) => {
+          const [lo, hi] = levelRange(track.pieces[j]!);
+          return c.level >= lo && c.level <= hi;
+        });
+        if (inTheWay) blocked.push(c.cell);
         openEnds.push(c);
       }
     }
@@ -297,24 +328,32 @@ export function analyzeTrack(track: TrackData): TrackLayout {
   return { occupancy, startIndex, order: closed ? order : [], closed, issues, openEnds };
 }
 
+/**
+ * The piece end facing connector `c` across the cell edge. Ends only connect at the same level;
+ * when the only facing end is at another level it is returned anyway (a height step, reported
+ * as an error) rather than silently joining two levels.
+ */
 function findMatch(
   track: TrackData,
-  occupancy: Map<string, number>,
+  occupancy: Map<string, number[]>,
   c: WorldConnector,
 ): { index: number; connector: 0 | 1; level: number } | null {
   const [dx, dz] = DIR_VEC[c.dir];
   const nx = c.cell[0] + dx;
   const nz = c.cell[1] + dz;
-  const index = occupancy.get(cellKey(nx, nz));
-  if (index === undefined) return null;
   const opposite = rotateDir(c.dir, 2);
-  const conns = worldConnectors(track.pieces[index]!);
-  for (const k of [0, 1] as const) {
-    const o = conns[k];
-    if (o.cell[0] === nx && o.cell[1] === nz && o.dir === opposite)
-      return { index, connector: k, level: o.level };
+  let other: { index: number; connector: 0 | 1; level: number } | null = null;
+  for (const index of occupancy.get(cellKey(nx, nz)) ?? []) {
+    const conns = worldConnectors(track.pieces[index]!);
+    for (const k of [0, 1] as const) {
+      const o = conns[k];
+      if (o.cell[0] !== nx || o.cell[1] !== nz || o.dir !== opposite) continue;
+      if (o.level === c.level) return { index, connector: k, level: o.level };
+      if (!other || Math.abs(o.level - c.level) < Math.abs(other.level - c.level))
+        other = { index, connector: k, level: o.level };
+    }
   }
-  return null;
+  return other;
 }
 
 export function isRaceable(layout: TrackLayout): boolean {
@@ -332,6 +371,8 @@ export type PathPiece = {
   tangents: Vec2[];
   /** Road height at each point. */
   heights: number[];
+  /** Highest level the piece reaches (drawing order on the map). */
+  level: number;
   /** Distance along the whole circuit at points[0]. */
   startDistance: number;
   length: number;
@@ -369,6 +410,7 @@ export function buildRacePath(track: TrackData, layout: TrackLayout): RacePath {
       points,
       tangents,
       heights,
+      level: pieceLevel(track.pieces[pieceIndex]!) + PIECES[track.pieces[pieceIndex]!.type].rise,
       startDistance: distance,
       length,
     };
@@ -400,23 +442,71 @@ export type TrackQuery = {
 };
 
 /** Finds where a world position is relative to the track (cell lookup, then nearest segment). */
-export function queryTrack(layout: TrackLayout, path: RacePath, x: number, z: number): TrackQuery {
-  const cx = Math.round(x / CELL);
-  const cz = Math.round(z / CELL);
-  const index = layout.occupancy.get(cellKey(cx, cz));
-  const pp = index === undefined ? undefined : path.byPiece.get(index);
-  if (!pp) {
-    return {
-      piece: null,
-      lateral: Infinity,
-      closest: { x, z },
-      tangent: { x: 0, z: 1 },
-      distance: 0,
-      onRoad: false,
-      height: 0,
-      grade: 0,
-    };
+/** How far above the kart a surface may be and still be the one it drives on (ramps, steps). */
+const STEP_UP = 0.8;
+/** Out to the deck edge, a raised piece is solid ground (asphalt, verges, under the walls). */
+const DECK_REACH = WALL_OFFSET + 0.6;
+
+const NO_TRACK = (x: number, z: number): TrackQuery => ({
+  piece: null,
+  lateral: Infinity,
+  closest: { x, z },
+  tangent: { x: 0, z: 1 },
+  distance: 0,
+  onRoad: false,
+  height: 0,
+  grade: 0,
+});
+
+/** Queries for every piece covering the point's cell (one per level where roads cross). */
+function queryCell(layout: TrackLayout, path: RacePath, x: number, z: number): TrackQuery[] {
+  const list = layout.occupancy.get(cellKey(Math.round(x / CELL), Math.round(z / CELL)));
+  if (!list) return [];
+  const out: TrackQuery[] = [];
+  for (const index of list) {
+    const pp = path.byPiece.get(index);
+    if (pp) out.push(queryPiece(pp, x, z));
   }
+  return out;
+}
+
+/**
+ * The surface a kart at height `y` is on: the highest one at or just above its wheels (a kart
+ * under a bridge stays on the lower road; on the bridge it cannot fall through). Without `y`,
+ * the top surface.
+ */
+function pickSurface(qs: TrackQuery[], y: number): TrackQuery | null {
+  let best: TrackQuery | null = null;
+  for (const q of qs) {
+    if (q.height > y + STEP_UP) continue;
+    if (
+      !best ||
+      q.height > best.height + 1e-6 ||
+      (Math.abs(q.height - best.height) < 1e-6 && q.lateral < best.lateral)
+    )
+      best = q;
+  }
+  if (best) return best;
+  // Everything is above the kart: the lowest surface.
+  for (const q of qs) if (!best || q.height < best.height) best = q;
+  return best;
+}
+
+/**
+ * Finds where a world position is relative to the track (cell lookup, then nearest segment).
+ * `y` (the kart's base height) picks the level where roads pass over each other.
+ */
+export function queryTrack(
+  layout: TrackLayout,
+  path: RacePath,
+  x: number,
+  z: number,
+  y = Infinity,
+): TrackQuery {
+  return pickSurface(queryCell(layout, path, x, z), y) ?? NO_TRACK(x, z);
+}
+
+function queryPiece(pp: PathPiece, x: number, z: number): TrackQuery {
   let best = Infinity;
   let closest: Vec2 = pp.points[0]!;
   let tangent: Vec2 = pp.tangents[0]!;
@@ -461,13 +551,37 @@ export function queryTrack(layout: TrackLayout, path: RacePath, x: number, z: nu
 }
 
 /**
- * Height of the drivable surface at a point: the road deck (asphalt, verges and walls) where a
- * piece is, the ground (0) elsewhere. The same profile builds the road mesh, so what you see is
- * what you drive on.
+ * Height of the drivable surface under a kart whose base is at `y`: the road deck (asphalt,
+ * verges and walls) where a piece is, the ground (0) elsewhere. The same profile builds the
+ * road mesh, so what you see is what you drive on. Where roads cross, the deck the kart is on
+ * (see pickSurface); without `y`, the top one.
  */
-export function groundHeight(layout: TrackLayout, path: RacePath, x: number, z: number): number {
-  const q = queryTrack(layout, path, x, z);
-  return q.piece && q.lateral <= WALL_OFFSET + 0.6 ? q.height : 0;
+export function groundHeight(
+  layout: TrackLayout,
+  path: RacePath,
+  x: number,
+  z: number,
+  y = Infinity,
+): number {
+  const decks = queryCell(layout, path, x, z).filter((q) => q.lateral <= DECK_REACH);
+  const q = pickSurface(decks, y);
+  return q && q.height <= y + STEP_UP ? Math.max(0, q.height) : 0;
+}
+
+/** Underside of the lowest deck above height `y` at a point (Infinity when open sky). */
+export function ceilingHeight(
+  layout: TrackLayout,
+  path: RacePath,
+  x: number,
+  z: number,
+  y: number,
+): number {
+  let ceiling = Infinity;
+  for (const q of queryCell(layout, path, x, z)) {
+    const under = q.height - DECK_DEPTH;
+    if (q.lateral <= DECK_REACH && under > y + 0.2) ceiling = Math.min(ceiling, under);
+  }
+  return ceiling;
 }
 
 /** Grid spawn slots behind the start line, in world space, with the race heading (yaw). */
@@ -537,5 +651,26 @@ export function cloneTrack(t: TrackData): TrackData {
     name: t.name,
     pieces: t.pieces.map((p) => ({ ...p })),
     props: t.props.map((p) => ({ ...p })),
+  };
+}
+
+const pieceKey = (p: TrackData["pieces"][number]) =>
+  `${p.type}:${p.x}:${p.z}:${p.rot}:${p.y ?? 0}:${p.flip ? 1 : 0}`;
+const propKey = (p: TrackData["props"][number]) => `${p.type}:${p.x}:${p.z}:${p.rot}`;
+
+/**
+ * The circuit with pieces and props in a canonical order. The physics world is built in piece
+ * order, so this is what makes a track file and its reordered copy simulate identically.
+ */
+export function canonicalTrack(t: TrackData): TrackData {
+  const byKey =
+    <T>(key: (x: T) => string) =>
+    (a: T, b: T) =>
+      key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0;
+  return {
+    version: 1,
+    name: t.name,
+    pieces: t.pieces.map((p) => ({ ...p })).sort(byKey(pieceKey)),
+    props: t.props.map((p) => ({ ...p })).sort(byKey(propKey)),
   };
 }

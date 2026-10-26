@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { KART_SCALE } from "./KartView";
+import { VEHICLE } from "./assets";
 
 // The best-lap ghost: the kart and a driver silhouette baked into one geometry and drawn as a
 // translucent, slightly glowing shell. A depth-only pre-pass hides the inner faces, so it reads
@@ -16,7 +16,7 @@ export class GhostView {
 
   constructor(model: THREE.Group) {
     const kart = model.clone(true);
-    kart.scale.setScalar(KART_SCALE);
+    kart.scale.setScalar(VEHICLE.scale);
     kart.updateMatrixWorld(true);
     const parts: THREE.BufferGeometry[] = [];
     kart.traverse((o) => {
@@ -28,11 +28,12 @@ export class GhostView {
       if (hidden) return;
       parts.push(strip(mesh.geometry).applyMatrix4(mesh.matrixWorld));
     });
-    // Driver silhouette: torso and helmet (kart-model units, as in KartView).
-    const s = KART_SCALE;
-    const torso = new THREE.CapsuleGeometry(0.13 * s, 0.16 * s, 4, 8);
-    torso.rotateX(-0.25).translate(0, 0.5 * s, -0.17 * s);
-    const head = new THREE.SphereGeometry(0.14 * s, 12, 8).translate(0, 0.79 * s, -0.13 * s);
+    // Driver silhouette: shoulders and helmet in the cockpit, where KartView seats the driver.
+    const hy = VEHICLE.helmet.y * VEHICLE.scale;
+    const hz = VEHICLE.helmet.z * VEHICLE.scale;
+    const torso = new THREE.CapsuleGeometry(0.13, 0.16, 4, 8);
+    torso.rotateX(-0.25).translate(0, hy - 0.29, hz - 0.04);
+    const head = new THREE.SphereGeometry(0.14, 12, 8).translate(0, hy, hz);
     parts.push(strip(torso), strip(head));
     torso.dispose();
     head.dispose();

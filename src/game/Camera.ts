@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { KART } from "./Vehicle";
+import { VEHICLE } from "./assets";
 
 // Camera rig with interchangeable follow modes, plus the editor and orbit views.
 //
@@ -35,6 +36,8 @@ export type FollowTarget = {
   roll: number;
   /** Slope of the road (or the flight path) under the kart, rad, nose up positive. */
   slope: number;
+  /** Underside of the lowest deck above the kart's level at a point (Infinity: open sky). */
+  ceilingAt?: (x: number, z: number) => number;
 };
 
 type FollowMode = {
@@ -52,6 +55,8 @@ type FollowMode = {
   velocityBias: number;
   /** Height follow rate (1/s). */
   heightRate: number;
+  /** Stays under bridge decks (the chase camera is lower than a deck over the road). */
+  underDecks?: boolean;
   shake: number;
   place: (
     t: FollowTarget,
@@ -75,9 +80,10 @@ const FOLLOW_MODES: Record<CameraMode, FollowMode> = {
       const fz = Math.cos(yaw);
       const back = 9.5 + s * 2;
       const height = 8.5 + s * 1.5;
-      pos.set(t.x - fx * back, height, t.z - fz * back);
+      // Heights are relative to the kart, so raised sections are framed like the ground.
+      pos.set(t.x - fx * back, t.y + height, t.z - fz * back);
       const ahead = 3 + s * 5;
-      look.set(t.x + fx * ahead, 0, t.z + fz * ahead);
+      look.set(t.x + fx * ahead, t.y, t.z + fz * ahead);
     },
   },
   chase: {
@@ -86,14 +92,15 @@ const FOLLOW_MODES: Record<CameraMode, FollowMode> = {
     yawRate: 4.5,
     velocityBias: 0.65,
     heightRate: 6,
+    underDecks: true,
     shake: 0.14,
     place(t, yaw, s, pos, look) {
       const fx = Math.sin(yaw);
       const fz = Math.cos(yaw);
       const back = 5.2 + s * 1.6;
-      pos.set(t.x - fx * back, 2.8 + s * 0.4, t.z - fz * back);
+      pos.set(t.x - fx * back, t.y + 2.8 + s * 0.4, t.z - fz * back);
       const ahead = 3 + s * 3;
-      look.set(t.x + fx * ahead, 0.8, t.z + fz * ahead);
+      look.set(t.x + fx * ahead, t.y + 0.8, t.z + fz * ahead);
     },
   },
   first: {
@@ -107,9 +114,9 @@ const FOLLOW_MODES: Record<CameraMode, FollowMode> = {
     place(t, yaw, _s, pos, look) {
       const fx = Math.sin(yaw);
       const fz = Math.cos(yaw);
-      // Eye point of the seated driver: above the seat, behind the steering wheel.
-      pos.set(t.x - fx * 0.1, t.y + 1.2, t.z - fz * 0.1);
-      look.set(t.x + fx * 12, t.y + 0.45, t.z + fz * 12);
+      // Eye point of the seated driver: at the visor, over the cockpit rim (VEHICLE.eye).
+      pos.set(t.x + fx * VEHICLE.eye.z, t.y + VEHICLE.eye.y, t.z + fz * VEHICLE.eye.z);
+      look.set(t.x + fx * 12, t.y + VEHICLE.eye.y - 0.55, t.z + fz * 12);
     },
   },
 };
@@ -245,12 +252,17 @@ export class CameraRig {
     // Position and aim come straight from the smoothed heading and the interpolated kart
     // position: no separate positional lag that could drift relative to the kart.
     m.place(t, this.yaw, s, _target, _look);
+    // Under a bridge: aim below the deck over the kart (eased like any height change), and never
+    // let the camera itself end up inside a deck.
+    const ceilingAt = m.underDecks ? t.ceilingAt : undefined;
+    if (ceilingAt) _target.y = Math.min(_target.y, ceilingAt(t.x, t.z) - 0.35);
     if (snap) {
       this.height = this.prevDesiredHeight = _target.y;
     } else {
       this.height = followLinear(this.height, this.prevDesiredHeight, _target.y, m.heightRate, dt);
       this.prevDesiredHeight = _target.y;
     }
+    if (ceilingAt) this.height = Math.min(this.height, ceilingAt(_target.x, _target.z) - 0.35);
     this.camera.position.set(_target.x, this.height, _target.z);
     this.applyShake(m, dt);
     this.camera.lookAt(_look);

@@ -4,6 +4,7 @@ import type { WallSegment } from "../Physics";
 import { LEVEL_HEIGHT, PIECES, ROAD_HALF, TIRE_RADIUS, WALL_OFFSET, type Vec2 } from "./pieces";
 import {
   cellKey,
+  DECK_DEPTH,
   footprintCells,
   pieceCenterline,
   pieceLevel,
@@ -12,6 +13,7 @@ import {
   type TrackData,
   type TrackLayout,
 } from "./Track";
+import { DECK_EDGE, overRoadMask, right, trackWalls } from "./walls";
 
 // Builds the visible track and the list of wall colliders from track data. Road and kerbs of all
 // pieces are merged into one geometry each, tire walls are a single InstancedMesh, so a whole
@@ -38,8 +40,6 @@ const COLORS = {
   bank: new THREE.Color("#a49c8c"),
   bankDark: new THREE.Color("#6f6a60"),
 };
-/** Deck edge of raised road: just outside the tire walls (where the verge ends). */
-const DECK_EDGE = WALL_OFFSET + 0.55;
 
 /** Deterministic 0..1 hash of a 2D point, for tiny colour variations. */
 function hash2(x: number, z: number) {
@@ -72,9 +72,6 @@ class MeshBuilder {
     return g;
   }
 }
-
-/** Right-hand normal of a tangent (matches the kart's right vector). */
-const right = (t: Vec2): Vec2 => ({ x: -t.z, z: t.x });
 
 /**
  * Adds a strip that follows the centerline between lateral offsets `o0` and `o1`.
@@ -231,7 +228,8 @@ export function buildTrack(
 ): BuiltTrack {
   const group = new THREE.Group();
   group.name = "track";
-  const walls: WallSegment[] = [];
+  // Colliders come from the shared pure builder (the server's lap replay uses the same one).
+  const walls: WallSegment[] = trackWalls(track, layout);
   const lights: THREE.Mesh[] = [];
   const geometries: THREE.BufferGeometry[] = [];
   const materials: THREE.Material[] = [];
@@ -309,26 +307,21 @@ export function buildTrack(
       );
     }
 
-    // Tire walls on both sides. Colliders follow the same polyline (one box on flat straights,
-    // every 2 m along curves and slopes, tilted with the road).
-    const straight = def.rise === 0 && def.segments.every((g) => g.kind === "line");
+    // Tire walls on both sides, along the same polylines as their colliders (walls.ts).
     for (const side of [-1, 1]) {
       const o = side * WALL_OFFSET;
       const wall = points.map((p, i) => {
         const n = right(tangents[i]!);
         return { x: p.x + n.x * o, y: heights[i]!, z: p.z + n.z * o };
       });
-      const colliderStep = straight ? wall.length - 1 : 2;
-      for (let i = 0; i < wall.length - 1; i += colliderStep) {
-        const a = wall[i]!;
-        const b = wall[Math.min(i + colliderStep, wall.length - 1)]!;
-        walls.push({ x1: a.x, z1: a.z, x2: b.x, z2: b.z, y1: a.y, y2: b.y });
-      }
       placeStacks(wall, def.kerbs, stacks);
     }
 
-    // Raised road: retaining walls from the deck edge down to the ground on both sides.
+    // Raised road: retaining walls from the deck edge down to the ground on both sides. Where it
+    // passes over another road (a lower piece in the same cell) it becomes a bridge: a thin deck
+    // with a short skirt and an underside, no wall (nor wall collider) blocking the road below.
     if (heights.some((h) => h > 0.01)) {
+      const overRoad = overRoadMask(track, layout, pieceIndex, points);
       for (const side of [-1, 1]) {
         const o = side * DECK_EDGE;
         let prev: [number, number] | null = null;
@@ -337,28 +330,31 @@ export function buildTrack(
           const n = right(tangents[i]!);
           const x = p.x + n.x * o;
           const z = p.z + n.z * o;
-          if (i > 0 && (i % 2 === 0 || i === points.length - 1)) {
-            // Collider: from the ground up to the deck, every 2 m (a kart on the grass beside a
-            // raised section hits it instead of being lifted on top).
-            const j = i % 2 === 0 ? i - 2 : i - 1;
-            const q = points[j]!;
-            const m = right(tangents[j]!);
-            walls.push({
-              x1: q.x + m.x * o,
-              z1: q.z + m.z * o,
-              x2: x,
-              z2: z,
-              height: Math.max(heights[i]!, heights[j]!) + 0.05,
-            });
-          }
+          const bridge = overRoad[i]!;
           const top = bank.vertex(x, heights[i]! + VERGE_Y, z, COLORS.bank);
-          const bottom = bank.vertex(x, -0.05, z, COLORS.bankDark);
+          const bottomY = bridge ? heights[i]! - DECK_DEPTH : -0.05;
+          const bottom = bank.vertex(x, bottomY, z, bridge ? COLORS.bank : COLORS.bankDark);
           if (prev) {
             if (side > 0) bank.quad(prev[0], top, prev[1], bottom);
             else bank.quad(top, prev[0], bottom, prev[1]);
           }
           prev = [top, bottom];
         }
+      }
+      // Bridge underside, seen from the road below.
+      let prevUnder: [number, number] | null = null;
+      for (let i = 0; i < points.length; i++) {
+        if (!overRoad[i] && !overRoad[i - 1] && !overRoad[i + 1]) {
+          prevUnder = null;
+          continue;
+        }
+        const p = points[i]!;
+        const n = right(tangents[i]!);
+        const y = heights[i]! - DECK_DEPTH;
+        const a = bank.vertex(p.x - n.x * DECK_EDGE, y, p.z - n.z * DECK_EDGE, COLORS.bankDark);
+        const b = bank.vertex(p.x + n.x * DECK_EDGE, y, p.z + n.z * DECK_EDGE, COLORS.bankDark);
+        if (prevUnder) bank.quad(prevUnder[0], prevUnder[1], a, b);
+        prevUnder = [a, b];
       }
     }
 

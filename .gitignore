@@ -14,3 +14,6 @@ npm-debug.log*
 next-env.d.ts
 /test-results/
 *.stackdump
+
+# Leaderboard / track library database (KARTING_DB)
+/data/

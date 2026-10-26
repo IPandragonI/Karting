@@ -6,7 +6,6 @@ import { LIVERIES } from "@/game/assets";
 import { CAMERA_MODES } from "@/game/Camera";
 import { formatTime } from "@/game/RaceManager";
 import { HelpPanel } from "./HelpPanel";
-import { SettingsDialog } from "./SettingsDialog";
 import { ShareDialog } from "./ShareDialog";
 import { useGame, useGameState } from "./useGame";
 
@@ -21,7 +20,6 @@ export function PauseMenu() {
   const record = useGameState((s) => s.race.recordLap);
   const [help, setHelp] = useState(false);
   const [share, setShare] = useState(false);
-  const [settings, setSettings] = useState(false);
 
   return (
     <div className="absolute inset-0 flex items-center justify-center bg-black/35 p-4">
@@ -51,7 +49,7 @@ export function PauseMenu() {
           <button className="btn btn-sm" onClick={() => setHelp(true)}>
             <Keyboard className="size-4" aria-hidden /> Controls
           </button>
-          <button className="btn col-span-2 btn-sm" onClick={() => setSettings(true)}>
+          <button className="btn col-span-2 btn-sm" onClick={() => game.openOverlay("settings")}>
             <Settings className="size-4" aria-hidden /> Settings: view, sound, keys, ghost
           </button>
         </div>
@@ -131,7 +129,6 @@ export function PauseMenu() {
         </fieldset>
       </div>
       <HelpPanel open={help} onClose={() => setHelp(false)} />
-      <SettingsDialog open={settings} onClose={() => setSettings(false)} />
       <ShareDialog open={share} onClose={() => setShare(false)} source="game" />
     </div>
   );

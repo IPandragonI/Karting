@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { LIVERIES, loadModels, type LiveryId, type Models } from "./assets";
+import { LIVERIES, loadModels, VEHICLE, type LiveryId, type Models } from "./assets";
 import { AudioManager, DEFAULT_VOLUME, type AudioState } from "./AudioManager";
 import {
   CAMERA_MODES,
@@ -18,16 +18,32 @@ import {
   type Bindings,
 } from "./InputManager";
 import {
+  buildReference,
   decodeGhost,
   encodeGhost,
   GhostRecorder,
+  referenceTime,
   sampleGhost,
   type GhostLap,
   type GhostPose,
+  type ReferenceCurve,
 } from "./Ghost";
 import { GhostView } from "./GhostView";
 import { KartView } from "./KartView";
-import { GRAVITY, KART_RADIUS, Physics } from "./Physics";
+import {
+  ApiError,
+  countPlay,
+  getNickname,
+  getTrack,
+  libraryFromHash,
+  publishTrack,
+  setNickname,
+  submitLap,
+  updateTrack,
+} from "./online";
+import { KART_RADIUS } from "./Physics";
+import { canonicalTrack, Simulation, STEP } from "./sim/Simulation";
+import { quantizeInput, TraceRecorder } from "./sim/trace";
 import { RaceManager, type RaceEvent, type RacePhase, type SectorResult } from "./RaceManager";
 import {
   createForest,
@@ -40,15 +56,17 @@ import {
 } from "./Scenery";
 import { Store } from "./store";
 import { createDefaultTrack } from "./track/defaultTrack";
-import { CELL, ROAD_HALF, TIRE_RADIUS, WALL_OFFSET } from "./track/pieces";
+import { layoutHash } from "./track/layoutHash";
+import { LEVEL_HEIGHT, ROAD_HALF } from "./track/pieces";
 import {
   analyzeTrack,
   buildRacePath,
   cloneTrack,
+  ceilingHeight,
   groundHeight,
   isRaceable,
+  pieceLevel,
   queryTrack,
-  startGrid,
   toWorld,
   trackBounds,
   trackId,
@@ -62,15 +80,7 @@ import { buildTrack, type BuiltTrack } from "./track/TrackBuilder";
 import { fromJson, toJson, trackFromHash } from "./track/TrackSerializer";
 import { TrackEditor, type EditorTool, type EditorUi } from "./TrackEditor";
 import { createTrackside, type Trackside } from "./Trackside";
-import {
-  afterCollision,
-  ASPHALT,
-  createKartState,
-  GRASS,
-  KART,
-  stepKart,
-  type KartState,
-} from "./Vehicle";
+import { createKartState, KART, type KartState } from "./Vehicle";
 
 // The game opens straight onto the track: the kart sits on the grid and the player drives an
 // endless time trial (out lap, then every lap timed). The editor, pause menu and settings are
@@ -108,6 +118,17 @@ export type UiState = {
   muted: boolean;
   audio: AudioState;
   race: RaceUi;
+  /** Panel open over the game, if any. */
+  overlay: Overlay | null;
+  /** Layout identity of the circuit being driven (leaderboard key). */
+  layout: string;
+  /** Library circuit this layout was loaded from, if any. */
+  library: LibraryRef | null;
+  /** Leaderboard nickname (null until chosen). */
+  nickname: string | null;
+  submission: Submission;
+  /** A personal best of this session waits for a nickname to be submitted. */
+  pendingSubmit: boolean;
   /** Player setting: show the best-lap ghost. */
   ghost: boolean;
   /** Comfort settings (persisted). */
@@ -150,19 +171,43 @@ export type FrameInfo = {
   drifting: boolean;
   lapTime: number;
   timing: boolean;
+  /** Live gap to the reference lap at the same point of the route (s, negative = ahead). */
+  delta: number | null;
   x: number;
   z: number;
   yaw: number;
+  /** Elevation level the kart is on (map marker). */
+  level: number;
+  /** Ghost position for the map (NaN when not shown). */
+  ghostX: number;
+  ghostZ: number;
 };
 
-// Fixed 60 Hz physics with interpolated rendering. The kart model is step-size independent (same
-// braking, steering and drift figures as at 120 Hz), and halving the steps halves crashcat's
-// per-step cost and the garbage it allocates.
-const STEP = 1 / 60;
+/** State of the last leaderboard submission, for the HUD and the leaderboard panel. */
+export type Submission =
+  | { state: "idle" }
+  | { state: "submitting"; time: number }
+  | { state: "verified"; time: number; rank: number; improved: boolean }
+  | { state: "rejected"; time: number; message: string }
+  | { state: "error"; time: number; message: string };
+
+/** Where the circuit being driven comes from in the track library (null: local only). */
+export type LibraryRef = {
+  id: string;
+  revision: number;
+  layout: string;
+  name: string;
+  creator: string | null;
+  official: boolean;
+  mine: boolean;
+};
+
+/** Panels opened over the game from the HUD (the game pauses underneath). */
+export type Overlay = "settings" | "leaderboard" | "library";
+
+// Fixed 60 Hz physics (STEP, from the simulation) with interpolated rendering. The kart model is
+// step-size independent, and a fixed step is also what makes a session replayable on the server.
 const MAX_STEPS = 5;
-const WALLS_PER_BODY = 16;
-/** Share of gravity acting along slopes (slower climbs, faster descents). */
-const SLOPE_PULL = 0.35;
 const BEST_KEY = "karting:best:";
 const LIVERY_KEY = "karting:livery";
 const CAMERA_KEY = "karting:camera";
@@ -267,6 +312,12 @@ export class Game {
       splitsFromLastLap: false,
       bestSectors: [null, null, null],
     },
+    overlay: null,
+    layout: "",
+    library: null,
+    nickname: null,
+    submission: { state: "idle" },
+    pendingSubmit: false,
     ghost: true,
     ghostTime: null,
     fov: { chase: defaultFov("chase"), first: defaultFov("first") },
@@ -313,21 +364,30 @@ export class Game {
   private trackside: Trackside | null = null;
   private props: THREE.Object3D[] = [];
   private propGeometry: THREE.BufferGeometry[] = [];
-  private coneMeshes: { mesh: THREE.Object3D; body: Physics["cones"][number] }[] = [];
+  private coneMeshes: { mesh: THREE.Object3D; body: Simulation["cones"][number]["body"] }[] = [];
 
-  private physics: Physics | null = null;
+  /** The driving simulation of the current session (shared with the server's lap replay). */
+  private sim: Simulation | null = null;
+  /** Every input of the session, for leaderboard verification. */
+  private readonly trace = new TraceRecorder();
+  private pendingReset = false;
   private kart: KartState = createKartState();
   private kartView: KartView | null = null;
   private lastQuery: TrackQuery | null = null;
   private onTrackQuery: TrackQuery | null = null;
   private race = new RaceManager(1, null);
-  private readonly line = { x: 0, z: 0, fx: 0, fz: 1 };
+  private readonly line = { x: 0, y: 0, z: 0, fx: 0, fz: 1 };
   /** Route distance of the start/finish line, and the kart's lap progress from it. */
   private lineDistance = 0;
   private progress: number | null = null;
   private splitHold = 0;
   private readonly ghostRecorder = new GhostRecorder();
   private ghostLap: GhostLap | null = null;
+  /** The ghost lap as time-at-progress, for the live delta. */
+  private reference: ReferenceCurve | null = null;
+  private liveDelta: number | null = null;
+  /** Resume driving when the open overlay closes (it was opened while playing). */
+  private resumeAfterOverlay = false;
   private ghostView: GhostView | null = null;
   private readonly ghostPose: GhostPose = { x: 0, y: 0, z: 0, yaw: 0 };
 
@@ -347,6 +407,7 @@ export class Game {
     pitch: 0,
     roll: 0,
     slope: 0,
+    ceilingAt: (x, z) => ceilingHeight(this.layout, this.path, x, z, this.follow.y),
   };
   private currYaw = 0;
   /** Road slope along the heading (or the flight path when airborne), rad, nose up. */
@@ -365,6 +426,10 @@ export class Game {
   private lastBrake = 0;
   private disposed = false;
   private pendingToast: { text: string; tone: Toast["tone"] } | null = null;
+  /** Library circuit to open once loading is done (from a #lib= share link). */
+  private pendingLibrary: { id: string; revision?: number } | null = null;
+  /** Best lap of the session not submitted yet (no nickname at the time). */
+  private unsubmitted: { layout: string; lap: number; time: number; trace: string } | null = null;
   private readonly frameListeners = new Set<(f: FrameInfo) => void>();
   private readonly frame: FrameInfo = {
     speed: 0,
@@ -372,9 +437,13 @@ export class Game {
     drifting: false,
     lapTime: 0,
     timing: false,
+    delta: null,
     x: 0,
     z: 0,
     yaw: 0,
+    level: 0,
+    ghostX: NaN,
+    ghostZ: NaN,
   };
   private readonly resizeObserver: ResizeObserver;
   private readonly lowPower: boolean;
@@ -518,6 +587,7 @@ export class Game {
    * editor, then the default circuit.
    */
   initialTrack(): TrackData | undefined {
+    this.pendingLibrary = libraryFromHash(window.location.hash);
     const shared = trackFromHash(window.location.hash);
     if (shared?.ok) {
       this.pendingToast = { text: `Loaded shared circuit “${shared.track.name}”`, tone: "success" };
@@ -566,6 +636,9 @@ export class Game {
     this.loadTrack(initialTrack ?? this.track);
     this.drive();
     if (this.pendingToast) this.toast(this.pendingToast.text, this.pendingToast.tone, 4);
+    void getNickname().then((nickname) => this.store.set({ nickname }));
+    if (this.pendingLibrary)
+      void this.loadLibraryTrack(this.pendingLibrary.id, this.pendingLibrary.revision);
     this.lastTime = performance.now();
     this.raf = requestAnimationFrame(this.loop);
   }
@@ -630,7 +703,7 @@ export class Game {
       return;
     }
     this.clearTrack();
-    this.track = cloneTrack(track);
+    this.track = canonicalTrack(track);
     this.layout = analyzeTrack(this.track);
     this.path = buildRacePath(this.track, this.layout);
     this.built = buildTrack(this.track, this.layout, this.models);
@@ -660,6 +733,7 @@ export class Game {
     if (start) {
       const c = toWorld(start, { x: 0, z: 0 });
       this.line.x = c.x;
+      this.line.y = pieceLevel(start) * LEVEL_HEIGHT;
       this.line.z = c.z;
       this.line.fx = Math.sin((start.rot * Math.PI) / 2);
       this.line.fz = Math.cos((start.rot * Math.PI) / 2);
@@ -672,8 +746,15 @@ export class Game {
       this.path.totalLength,
       readSectors(SECTORS_KEY + id),
     );
-    this.lineDistance = queryTrack(this.layout, this.path, this.line.x, this.line.z).distance;
+    this.lineDistance = queryTrack(
+      this.layout,
+      this.path,
+      this.line.x,
+      this.line.z,
+      this.line.y,
+    ).distance;
     this.ghostLap = raceable ? decodeGhost(read(GHOST_KEY + id)) : null;
+    this.reference = this.buildReferenceCurve(this.ghostLap);
     this.splitHold = 0;
     this.store.set({
       trackName: this.track.name,
@@ -681,6 +762,7 @@ export class Game {
       race: this.raceUi(),
       ghostTime: this.ghostLap?.time ?? null,
       issues: this.layout.issues,
+      layout: layoutHash(this.track),
     });
     this.buildPhysics();
     // The gantry shows green: the session is always "live".
@@ -714,56 +796,38 @@ export class Game {
     this.ground = null;
   }
 
+  /**
+   * The driving simulation for the current circuit (physics world, kart, race progress), plus the
+   * meshes of its props. The simulation is shared with the leaderboard server's lap replay.
+   */
   private buildPhysics() {
-    const grid = startGrid(this.track, this.layout);
-    const physics = new Physics(grid);
-    const walls = (this.built?.walls ?? []).map((seg) => ({
-      seg,
-      halfThickness: TIRE_RADIUS,
-      height: seg.height ?? 1.4,
-    }));
-    // Outer boundary so nobody drives off into the void.
-    const b = trackBounds(this.track);
-    const m = CELL * 3;
-    const x0 = b.minX - m;
-    const x1 = b.maxX + m;
-    const z0 = b.minZ - m;
-    const z1 = b.maxZ + m;
-    for (const seg of [
-      { x1: x0, z1: z0, x2: x1, z2: z0 },
-      { x1: x1, z1: z0, x2: x1, z2: z1 },
-      { x1: x1, z1: z1, x2: x0, z2: z1 },
-      { x1: x0, z1: z1, x2: x0, z2: z0 },
-    ]) {
-      walls.push({ seg, halfThickness: 1, height: 3 });
-    }
-    // Walls in compound bodies of 16 boxes. Measured with the kart scraping a wall: a body per box
-    // cost 1.6 ms and 78 KB of garbage per step, one compound for everything 0.7 ms / 18 KB,
-    // groups of 16 0.37 ms / 3.7 KB (the broadphase skips far groups, the narrowphase stays small).
-    for (let i = 0; i < walls.length; i += WALLS_PER_BODY)
-      physics.addWalls(walls.slice(i, i + WALLS_PER_BODY));
-
+    const sim = new Simulation(this.track, {
+      layout: this.layout,
+      path: this.path,
+      race: this.race,
+      walls: this.built?.walls,
+    });
     let tireGeo: THREE.BufferGeometry | null = null;
     const tireMat = new THREE.MeshStandardMaterial({ color: "#2a2c31", roughness: 0.85 });
     for (const prop of this.track.props) {
-      if (prop.type === "tires") {
-        physics.addTireStack(prop.x, prop.z);
-        if (!tireGeo) {
-          tireGeo = new THREE.TorusGeometry(0.3, 0.13, 8, 16).rotateX(Math.PI / 2);
-          this.propGeometry.push(tireGeo);
-        }
-        const stack = new THREE.Group();
-        for (let i = 0; i < 3; i++) {
-          const t = new THREE.Mesh(tireGeo, tireMat);
-          t.position.y = 0.13 + i * 0.26;
-          t.castShadow = true;
-          stack.add(t);
-        }
-        stack.position.set(prop.x, 0, prop.z);
-        this.scene.add(stack);
-        this.props.push(stack);
-      } else if (this.models) {
-        const body = physics.addCone(prop.x, prop.z);
+      if (prop.type !== "tires") continue;
+      if (!tireGeo) {
+        tireGeo = new THREE.TorusGeometry(0.3, 0.13, 8, 16).rotateX(Math.PI / 2);
+        this.propGeometry.push(tireGeo);
+      }
+      const stack = new THREE.Group();
+      for (let i = 0; i < 3; i++) {
+        const t = new THREE.Mesh(tireGeo, tireMat);
+        t.position.y = 0.13 + i * 0.26;
+        t.castShadow = true;
+        stack.add(t);
+      }
+      stack.position.set(prop.x, 0, prop.z);
+      this.scene.add(stack);
+      this.props.push(stack);
+    }
+    if (this.models) {
+      for (const { body } of sim.cones) {
         const mesh = this.models.cone.clone();
         mesh.scale.setScalar(1.2);
         // The cone model's base is at y = 0; the physics cylinder is centred at its middle.
@@ -775,8 +839,36 @@ export class Game {
         this.coneMeshes.push({ mesh: holder, body });
       }
     }
-    this.physics = physics;
-    this.placeKart(grid.x, grid.z, grid.yaw);
+    this.sim = sim;
+    this.ensureKartView();
+    sim.start();
+    this.syncFromSim();
+    this.afterReset();
+  }
+
+  /** Copies the simulation's kart state into the render-side interpolation fields. */
+  private syncFromSim() {
+    const sim = this.sim;
+    if (!sim) return;
+    this.kart = sim.kart;
+    this.prevPos.set(sim.prevPos.x, sim.prevPos.y, sim.prevPos.z);
+    this.currPos.set(sim.currPos.x, sim.currPos.y, sim.currPos.z);
+    this.prevYaw = sim.prevYaw;
+    this.currYaw = sim.currYaw;
+    this.prevVel.set(sim.prevVel.x, sim.prevVel.z);
+    this.currVel.set(sim.currVel.x, sim.currVel.z);
+    this.lastQuery = sim.lastQuery;
+    this.onTrackQuery = sim.onTrackQuery;
+    this.progress = sim.progress;
+  }
+
+  /** The kart was just put on the track: no leftover hints, camera snaps to it. */
+  private afterReset() {
+    this.slope = 0;
+    this.stuckTime = 0;
+    this.wrongWayTime = 0;
+    this.store.set({ stuckHint: false, wrongWay: false });
+    this.rig.cut();
   }
 
   // ─── Kart & settings ─────────────────────────────────────────────────────
@@ -784,7 +876,7 @@ export class Game {
   private ensureKartView() {
     if (this.kartView || !this.models) return;
     const livery = LIVERIES.find((l) => l.id === this.store.get().livery) ?? LIVERIES[0];
-    this.kartView = new KartView(this.models["kart-oobi"], livery.color);
+    this.kartView = new KartView(this.models[VEHICLE.model], livery.color);
     this.kartView.setDriverVisible(this.store.get().camera !== "first");
     this.scene.add(this.kartView.root);
     this.kartView.update(
@@ -796,7 +888,7 @@ export class Game {
       0,
     );
     if (!this.ghostView) {
-      this.ghostView = new GhostView(this.models["kart-oobi"]);
+      this.ghostView = new GhostView(this.models[VEHICLE.model]);
       this.scene.add(this.ghostView.root);
     }
   }
@@ -887,35 +979,13 @@ export class Game {
     this.store.set({ muted: false, audio: this.audio.state });
   }
 
-  private placeKart(x: number, z: number, yaw: number) {
-    this.ensureKartView();
-    const ground = groundHeight(this.layout, this.path, x, z);
-    this.physics?.teleportKart(x, z, ground);
-    this.kart = createKartState(yaw);
-    this.slope = 0;
-    this.prevPos.set(x, ground + KART_RADIUS, z);
-    this.currPos.copy(this.prevPos);
-    this.prevYaw = this.currYaw = yaw;
-    this.prevVel.set(0, 0);
-    this.currVel.set(0, 0);
-    this.lastQuery = this.onTrackQuery = queryTrack(this.layout, this.path, x, z);
-    this.progress = null;
-    this.stuckTime = 0;
-    this.wrongWayTime = 0;
-    this.store.set({ stuckHint: false, wrongWay: false });
-    this.rig.cut();
-  }
-
-  /** R: back onto the centerline of the last piece we were on, facing the race direction. */
+  /**
+   * R: back onto the centerline of the last piece the kart was on. Applied by the simulation on
+   * the next step (it is part of the recorded input, so a replay resets at the same moment).
+   */
   resetKart() {
     if (this.store.get().screen !== "playing") return;
-    const q = this.onTrackQuery;
-    if (!q || !q.piece) {
-      const g = startGrid(this.track, this.layout);
-      this.placeKart(g.x, g.z, g.yaw);
-      return;
-    }
-    this.placeKart(q.closest.x, q.closest.z, Math.atan2(q.tangent.x, q.tangent.z));
+    this.pendingReset = true;
   }
 
   // ─── Flow ────────────────────────────────────────────────────────────────
@@ -923,13 +993,14 @@ export class Game {
   /** Put the kart on the grid and start (or restart) the session: out lap, then timed laps. */
   private drive() {
     this.buildPhysics();
+    this.trace.clear();
+    this.pendingReset = false;
     this.skids.clear();
     this.particles.clear();
-    if (this.store.get().raceable) this.race.start();
-    else this.race.stop();
     this.ghostRecorder.cancel();
     this.ghostView?.set(null);
     this.splitHold = 0;
+    this.liveDelta = null;
     this.store.set({ screen: "playing", toast: null, race: this.raceUi() });
     this.input.enabled = true;
     this.accumulator = 0;
@@ -952,6 +1023,23 @@ export class Game {
     this.input.enabled = false;
     this.input.clear();
     this.store.set({ screen: "paused" });
+  }
+
+  /** Opens a panel over the game; driving pauses and resumes when it closes. */
+  openOverlay(overlay: Overlay) {
+    if (this.store.get().screen === "playing") {
+      this.pause();
+      this.resumeAfterOverlay = true;
+    }
+    this.store.set({ overlay });
+  }
+
+  closeOverlay() {
+    this.store.set({ overlay: null });
+    if (this.resumeAfterOverlay) {
+      this.resumeAfterOverlay = false;
+      this.resume();
+    }
   }
 
   resume() {
@@ -1034,8 +1122,129 @@ export class Game {
     return cloneTrack(this.editor?.track ?? this.track);
   }
 
+  // ─── Leaderboard & library ───────────────────────────────────────────────
+
+  /**
+   * A new personal best: submit it for verification (the server replays this session's inputs),
+   * or keep it until a nickname is chosen.
+   */
+  private queueSubmission(lap: number, time: number) {
+    if (this.trace.full) {
+      this.toast("Session too long to verify: restart the lap to post times", "info", 3);
+      return;
+    }
+    this.unsubmitted = { layout: this.store.get().layout, lap, time, trace: this.trace.encode() };
+    if (this.store.get().nickname) void this.submitPending();
+    else this.store.set({ pendingSubmit: true });
+  }
+
+  /** Sends the held personal best to the leaderboard. */
+  async submitPending() {
+    const lap = this.unsubmitted;
+    if (!lap) return;
+    this.unsubmitted = null;
+    this.store.set({ pendingSubmit: false, submission: { state: "submitting", time: lap.time } });
+    try {
+      const r = await submitLap(lap);
+      this.store.set({
+        submission: { state: "verified", time: r.time, rank: r.rank, improved: r.improved },
+      });
+      if (r.improved) this.toast(`Verified! Leaderboard rank #${r.rank}`, "success", 2.5);
+    } catch (e) {
+      const err = e instanceof ApiError ? e : new ApiError(0, String(e), "error");
+      const rejected = err.status === 422 || err.status === 409 || err.status === 400;
+      this.store.set({
+        submission: {
+          state: rejected ? "rejected" : "error",
+          time: lap.time,
+          message: err.message,
+        },
+      });
+      // Server unreachable or busy: keep it for a retry from the leaderboard panel.
+      if (!rejected && err.code !== "unknown_layout") {
+        this.unsubmitted = lap;
+        this.store.set({ pendingSubmit: true });
+      }
+    }
+  }
+
+  /** Chooses or changes the leaderboard nickname (submits a held personal best). */
+  async setPlayerNickname(nickname: string) {
+    const name = await setNickname(nickname);
+    this.store.set({ nickname: name });
+    if (this.unsubmitted) void this.submitPending();
+    return name;
+  }
+
+  /** Opens a published circuit (a given revision, else the latest) and starts driving it. */
+  async loadLibraryTrack(id: string, revision?: number) {
+    try {
+      const r = await getTrack(id, revision);
+      const parsed = fromJson(r.version.data);
+      if (!parsed.ok) throw new Error(parsed.error);
+      if (this.store.get().screen === "editor") this.editor?.disable();
+      this.loadTrack(parsed.track);
+      write(TRACK_KEY, toJson(parsed.track));
+      this.store.set({
+        overlay: null,
+        library: {
+          id: r.track.id,
+          revision: r.version.revision,
+          layout: r.version.layout,
+          name: r.track.name,
+          creator: r.track.creator,
+          official: r.track.official,
+          mine: r.track.mine,
+        },
+      });
+      this.drive();
+      this.toast(`${r.track.name}${r.track.creator ? ` by ${r.track.creator}` : ""}`, "info", 2.5);
+      void countPlay(id);
+    } catch (e) {
+      this.toast(`Could not open the circuit: ${(e as Error).message}`, "warning", 3);
+    }
+  }
+
+  /** Publishes the circuit being driven as a new library entry. */
+  async publishCurrent(name: string, description: string) {
+    const track = { ...this.track, name };
+    const r = await publishTrack(name, description, toJson(track));
+    this.store.set({
+      trackName: name,
+      library: {
+        id: r.id,
+        revision: r.revision,
+        layout: r.layout,
+        name,
+        creator: this.store.get().nickname,
+        official: false,
+        mine: true,
+      },
+    });
+    this.track = { ...this.track, name };
+    return r;
+  }
+
+  /** Publishes the circuit being driven as a new version of the player's library entry. */
+  async publishRevision(description?: string) {
+    const lib = this.store.get().library;
+    if (!lib?.mine) throw new Error("Not your circuit");
+    const r = await updateTrack(lib.id, {
+      name: this.track.name,
+      description,
+      track: toJson(this.track),
+    });
+    this.store.set({ library: { ...lib, revision: r.revision, layout: r.layout } });
+    return r;
+  }
+
+  getTrackJson(): string {
+    return toJson(this.track);
+  }
+
   /** Import from the share dialog outside the editor: load it and start driving it. */
   importTrack(track: TrackData) {
+    this.store.set({ library: null });
     this.loadTrack(track);
     write(TRACK_KEY, toJson(track));
     this.drive();
@@ -1066,11 +1275,25 @@ export class Game {
     this.ghostRecorder.push(t, c.x, c.y - KART_RADIUS, c.z, this.currYaw);
   }
 
+  /** Route progress from the start line of a position on the circuit (null off the circuit). */
+  private routeProgress(x: number, y: number, z: number): number | null {
+    const total = this.path.totalLength;
+    const q = queryTrack(this.layout, this.path, x, z, y);
+    if (!q.piece || q.piece.order < 0 || total <= 0) return null;
+    return (((q.distance - this.lineDistance) % total) + total) % total;
+  }
+
+  private buildReferenceCurve(lap: GhostLap | null): ReferenceCurve | null {
+    if (!lap) return null;
+    return buildReference(lap, this.path.totalLength, (x, y, z) => this.routeProgress(x, y, z));
+  }
+
   /** Keeps the lap as the circuit's ghost when it beats the stored one. */
   private finishGhostLap(time: number) {
     const lap = this.ghostRecorder.finish(time);
     if (!lap || (this.ghostLap && this.ghostLap.time <= time)) return;
     this.ghostLap = lap;
+    this.reference = this.buildReferenceCurve(lap);
     writeGhost(GHOST_KEY + trackId(this.track), encodeGhost(lap));
     this.store.set({ ghostTime: lap.time });
   }
@@ -1096,6 +1319,7 @@ export class Game {
           break;
         }
         case "lap": {
+          if (e.record) this.queueSubmission(e.lap, e.time);
           this.finishGhostLap(e.time);
           this.beginGhostLap();
           this.splitHold = SPLIT_HOLD;
@@ -1179,129 +1403,64 @@ export class Game {
   };
 
   private fixedStep(dt: number) {
-    const physics = this.physics;
-    if (!physics) return;
-    const input = this.input.read();
-    this.race.tick(dt);
+    const sim = this.sim;
+    if (!sim) return;
+    // Quantized before use, so the recorded trace is exactly what the simulation ran on.
+    const input = quantizeInput(this.input.read(), this.pendingReset);
+    this.pendingReset = false;
+    this.trace.push(input);
     this.lastThrottle = input.throttle;
     this.lastBrake = input.brake;
 
-    // Surface under the kart.
-    const q = queryTrack(this.layout, this.path, this.currPos.x, this.currPos.z);
-    this.lastQuery = q;
-    if (q.piece && q.lateral < ROAD_HALF + 1) this.onTrackQuery = q;
-    const offTrack = q.lateral > ROAD_HALF + 0.6;
+    const r = sim.step(input);
+    this.syncFromSim();
+    if (r.reset) this.afterReset();
 
-    stepKart(this.kart, input, offTrack ? GRASS : ASPHALT, dt);
-
-    // Elevation: the kart rides the road's height profile. On the surface, its vertical speed
-    // follows the ground under where it is heading (crashcat then subtracts one step of
-    // gravity); when the ground falls away faster than gravity can pull the kart down (a crest
-    // taken fast) it keeps its own vertical speed, flies, and lands further on.
-    const foot = this.currPos.y - KART_RADIUS;
-    const g0 = groundHeight(this.layout, this.path, this.currPos.x, this.currPos.z);
-    const g1 = groundHeight(
-      this.layout,
-      this.path,
-      this.currPos.x + this.kart.vx * dt,
-      this.currPos.z + this.kart.vz * dt,
-    );
-    let vy = physics.kart.motionProperties.linearVelocity[1];
-    const falling = foot - g0 > 0.05 ? vy : 0;
-    // (A raised deck more than a step above is a wall: its collider stops the kart.)
-    if (foot - g0 < 0.05 && g1 - foot < 1) {
-      vy = Math.max((g1 - g0) / dt + GRAVITY * dt, vy);
-      const speed = Math.hypot(this.kart.vx, this.kart.vz);
-      if (speed > 0.5 && g1 !== g0) {
-        const grade = THREE.MathUtils.clamp((g1 - g0) / (speed * dt), -0.5, 0.5);
-        const k = 1 - (GRAVITY * SLOPE_PULL * grade * dt) / speed;
-        this.kart.vx *= k;
-        this.kart.vz *= k;
-      }
+    // Feedback: landing thump, wall hits, cones.
+    if (r.landing < 0) {
+      this.rig.addShake(Math.min(0.35, -r.landing / 30));
+      this.audio.impact(-r.landing * 0.6);
     }
-    physics.setKartVelocity(this.kart.vx, vy, this.kart.vz);
-    const conesBefore = physics.coneHit;
-    physics.step(dt);
-
-    // Discrete steps can leave the kart a hair inside a rising surface: lift it out.
-    const pos = physics.kart.position;
-    const ground = groundHeight(this.layout, this.path, pos[0], pos[2]);
-    if (pos[1] < ground + KART_RADIUS - 0.01 && ground - (pos[1] - KART_RADIUS) < 1)
-      physics.setKartHeight(ground + KART_RADIUS);
-    // Landing after a jump: a thump proportional to the vertical speed.
-    if (falling < -4 && pos[1] - KART_RADIUS - ground < 0.03) {
-      this.rig.addShake(Math.min(0.35, -falling / 30));
-      this.audio.impact(-falling * 0.6);
+    if (r.impact > 2.5) {
+      this.rig.addShake(Math.min(1, r.impact / 20));
+      this.audio.impact(r.impact);
     }
+    if (r.coneHit) this.audio.impact(4);
 
-    const p = physics.kart.position;
-    const v = physics.kart.motionProperties.linearVelocity;
-    // Any difference between the velocity we asked for and what came back is a collision.
-    const impact = Math.hypot(v[0] - this.kart.vx, v[2] - this.kart.vz);
-    if (impact > 0.05) {
-      afterCollision(this.kart, v[0], v[2]);
-      if (impact > 2.5) {
-        this.rig.addShake(Math.min(1, impact / 20));
-        this.audio.impact(impact);
-      }
-    }
-    if (physics.coneHit !== conesBefore) this.audio.impact(4);
-
-    this.prevPos.copy(this.currPos);
-    this.currPos.set(p[0], p[1], p[2]);
-    this.prevYaw = this.currYaw;
-    this.currYaw = this.kart.yaw;
-    this.prevVel.copy(this.currVel);
-    this.currVel.set(this.kart.vx, this.kart.vz);
-
-    // Race progress: piece in race order, sector boundaries (route distance from the line, from
-    // where the kart was to where it is now) and start/finish line crossing.
+    // Ghost sample at this step's lap time (before a line crossing restarted the clock), then
+    // the race events (a finished lap closes the ghost recording and starts the next).
     this.ghostRecorder.push(
-      this.race.lapTime,
+      r.lapTime,
       this.currPos.x,
       this.currPos.y - KART_RADIUS,
       this.currPos.z,
       this.currYaw,
     );
-    if (q.piece && q.piece.order >= 0) {
-      this.race.onPiece(q.piece.order);
-      const total = this.path.totalLength;
-      const now = queryTrack(this.layout, this.path, this.currPos.x, this.currPos.z);
-      if (now.piece && now.piece.order >= 0 && total > 0) {
-        const progress = (((now.distance - this.lineDistance) % total) + total) % total;
-        if (this.progress !== null)
-          this.handleRaceEvents(this.race.onProgress(this.progress, progress, dt));
-        this.progress = progress;
-      }
-    }
-    const l = this.line;
-    const d0 = (this.prevPos.x - l.x) * l.fx + (this.prevPos.z - l.z) * l.fz;
-    const d1 = (this.currPos.x - l.x) * l.fx + (this.currPos.z - l.z) * l.fz;
-    if ((d0 < 0 && d1 >= 0) || (d0 >= 0 && d1 < 0)) {
-      const lateral = Math.abs((this.currPos.x - l.x) * l.fz - (this.currPos.z - l.z) * l.fx);
-      if (lateral < WALL_OFFSET + 1 && Math.abs(d1 - d0) < 2) {
-        const forward = d1 >= 0;
-        const overshoot = forward ? (d1 / (d1 - d0)) * dt : 0;
-        this.handleRaceEvents(this.race.onLineCrossed(forward, overshoot));
-      }
-    }
+    this.handleRaceEvents(r.events);
+
+    // Live delta: where the reference lap was at this same point of the route.
+    if (this.reference && this.race.timingLap && this.progress !== null)
+      this.liveDelta = this.race.lapTime - referenceTime(this.reference, this.progress);
+    else this.liveDelta = null;
 
     // Slope for the chassis and the first-person view: the road along the heading, or the flight
     // path while airborne.
-    const speedNow = Math.hypot(v[0], v[2]);
-    if (p[1] - KART_RADIUS - ground > 0.15) {
-      this.slope = THREE.MathUtils.clamp(Math.atan2(v[1], Math.max(speedNow, 4)), -0.35, 0.35);
+    const p = this.currPos;
+    const base = p.y - KART_RADIUS;
+    const ground = groundHeight(this.layout, this.path, p.x, p.z, base);
+    const vy = sim.physics.kart.motionProperties.linearVelocity[1];
+    const speedNow = Math.hypot(this.currVel.x, this.currVel.y);
+    if (base - ground > 0.15) {
+      this.slope = THREE.MathUtils.clamp(Math.atan2(vy, Math.max(speedNow, 4)), -0.35, 0.35);
     } else {
       const hx = Math.sin(this.kart.yaw) * 0.9;
       const hz = Math.cos(this.kart.yaw) * 0.9;
-      const front = groundHeight(this.layout, this.path, p[0] + hx, p[2] + hz);
-      const back = groundHeight(this.layout, this.path, p[0] - hx, p[2] - hz);
+      const front = groundHeight(this.layout, this.path, p.x + hx, p.z + hz, base);
+      const back = groundHeight(this.layout, this.path, p.x - hx, p.z - hz, base);
       this.slope = Math.abs(front - back) < 1 ? Math.atan2(front - back, 1.8) : 0;
     }
 
-    // Fell out of the world (should not happen, but never leave the player stranded).
-    if (p[1] < -5) this.resetKart();
-
+    const q = r.query;
     const speed = Math.hypot(this.kart.vx, this.kart.vz);
     // Stuck: pushing but going nowhere for a while.
     if ((input.throttle > 0 || input.brake > 0) && speed < 0.8) this.stuckTime += dt;
@@ -1393,9 +1552,14 @@ export class Game {
     f.drifting = this.kart.drifting;
     f.lapTime = this.race.lapTime;
     f.timing = this.race.phase === "timing";
+    f.delta = f.timing ? this.liveDelta : null;
     f.x = x;
     f.z = z;
     f.yaw = yaw;
+    f.level = Math.max(0, Math.round((y - KART_RADIUS) / LEVEL_HEIGHT));
+    const ghostShown = this.ghostView?.root.visible ?? false;
+    f.ghostX = ghostShown ? this.ghostPose.x : NaN;
+    f.ghostZ = ghostShown ? this.ghostPose.z : NaN;
     for (const l of this.frameListeners) l(f);
 
     this.built?.updateLod(this.rig.camera.position);
@@ -1441,7 +1605,8 @@ export class Game {
     this.particles.update(dt);
     if (dt === 0 || !this.kartView) return;
     this.kartView.rearContacts(_wheels);
-    for (const w of _wheels) w.y = groundHeight(this.layout, this.path, w.x, w.z);
+    const base = this.currPos.y - KART_RADIUS;
+    for (const w of _wheels) w.y = groundHeight(this.layout, this.path, w.x, w.z, base);
     const k = this.kart;
     // Marks when sliding, drifting or braking hard; none on grass.
     const braking = k.accel < -20 && speed > 6 ? 0.6 : 0;
@@ -1474,7 +1639,13 @@ export class Game {
       x: this.currPos.x,
       y: this.currPos.y - KART_RADIUS,
       z: this.currPos.z,
-      ground: groundHeight(this.layout, this.path, this.currPos.x, this.currPos.z),
+      ground: groundHeight(
+        this.layout,
+        this.path,
+        this.currPos.x,
+        this.currPos.z,
+        this.currPos.y - KART_RADIUS,
+      ),
       yaw: this.kart.yaw,
       speed: Math.hypot(this.kart.vx, this.kart.vz),
       drifting: this.kart.drifting,

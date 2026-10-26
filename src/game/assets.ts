@@ -4,8 +4,8 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 // Models are CC0 assets from Kenney (see ASSETS.md), served from /public/models.
 
 /**
- * Liveries for the kart: the chassis, the driver's suit and helmet take this colour. The Car Kit
- * karts all share one chassis, so a single model is loaded and tinted.
+ * Liveries: the car's bodywork (its red palette swatches), the driver's suit and helmet take
+ * this colour.
  */
 export const LIVERIES = [
   { id: "snow", label: "Snow", color: "#f2efe6" },
@@ -16,8 +16,26 @@ export const LIVERIES = [
 ] as const;
 export type LiveryId = (typeof LIVERIES)[number]["id"];
 
+/**
+ * The player's car: Kenney Car Kit "race", a low-poly open-wheel single-seater (CC0, ASSETS.md).
+ * Its forward axis is +Z like the physics heading and its base sits at y = 0. Physics never sees
+ * this model: the collider is the kart sphere, so only the look changes.
+ */
+export const VEHICLE = {
+  model: "race",
+  /** Model units → metres: 2.56 long → 2.1 m, close to the collider's footprint. */
+  scale: 0.82,
+  /** Helmet centre in model units: on the cockpit deck (y 0.49), in front of the roll hoop. */
+  helmet: { y: 0.63, z: 0.1 },
+  /**
+   * First-person eye relative to the car origin (metres): at the visor, above the bodywork and in
+   * front of the roll hoop, so the camera never sits inside solid geometry.
+   */
+  eye: { y: 0.74, z: 0.2 },
+} as const;
+
 const MODELS = [
-  "kart-oobi",
+  "race",
   "cone",
   "treeLarge",
   "treeSmall",

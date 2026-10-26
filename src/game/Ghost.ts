@@ -166,3 +166,67 @@ export function decodeGhost(text: string | null): (GhostLap & { savedAt: number 
     return null;
   }
 }
+
+// ─── Live delta ─────────────────────────────────────────────────────────────
+
+/**
+ * A reference lap as "time at each point of the route": for every ghost sample (lap time k·step),
+ * the kart's progress along the route from the start line. Comparing positions, not elapsed
+ * time against the total, is what makes the live delta meaningful: reaching a given corner
+ * earlier than on the reference lap shows as ahead, wherever that corner is on the lap.
+ */
+export type ReferenceCurve = {
+  /** Non-decreasing route progress (m) of sample k. */
+  progress: Float32Array;
+  step: number;
+  time: number;
+};
+
+/**
+ * Builds the curve from a ghost lap. `progressAt` returns the route progress of a position (0 at
+ * the line, up to `lapLength`), or null when the position is off the circuit.
+ */
+export function buildReference(
+  lap: GhostLap,
+  lapLength: number,
+  progressAt: (x: number, y: number, z: number) => number | null,
+): ReferenceCurve | null {
+  const n = lap.samples.length / STRIDE;
+  if (n < 2 || !(lapLength > 0)) return null;
+  const progress = new Float32Array(n);
+  const s = lap.samples;
+  let prev = 0;
+  for (let k = 0; k < n; k++) {
+    let p = progressAt(s[k * STRIDE]!, s[k * STRIDE + 1]!, s[k * STRIDE + 2]!) ?? prev;
+    if (k === 0) {
+      // The first sample sits on the line, possibly a hair before it (progress ≈ lap length).
+      prev = p > lapLength / 2 ? 0 : p;
+    } else {
+      // Unwrap across the line, and never go backwards (a wobble or a reset is not progress).
+      while (p - prev < -lapLength / 2) p += lapLength;
+      while (p - prev > lapLength / 2) p -= lapLength;
+      prev = Math.max(prev, p);
+    }
+    progress[k] = prev;
+  }
+  return { progress, step: lap.step, time: lap.time };
+}
+
+/** Lap time at which the reference lap reached route progress `p`. */
+export function referenceTime(ref: ReferenceCurve, p: number): number {
+  const pr = ref.progress;
+  const n = pr.length;
+  if (p <= pr[0]!) return 0;
+  if (p >= pr[n - 1]!) return ref.time;
+  let lo = 0;
+  let hi = n - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (pr[mid]! < p) lo = mid;
+    else hi = mid;
+  }
+  const a = pr[lo]!;
+  const b = pr[hi]!;
+  const f = b > a ? (p - a) / (b - a) : 0;
+  return Math.min(ref.time, (lo + f) * ref.step);
+}

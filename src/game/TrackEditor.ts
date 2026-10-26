@@ -182,6 +182,7 @@ export class TrackEditor {
     this.preview = false;
     this.root.visible = true;
     this.frameTrack();
+    this.applyWorkingLevel();
     const c = this.host.canvas;
     c.addEventListener("pointerdown", this.onPointerDown);
     c.addEventListener("pointermove", this.onPointerMove);
@@ -247,6 +248,7 @@ export class TrackEditor {
   /** Level for new pieces placed away from raised road. */
   setLevel(level: number) {
     this.level = Math.max(0, Math.min(MAX_LEVEL, level));
+    this.applyWorkingLevel();
     this.updateGhost();
     this.pushUi();
   }
@@ -255,6 +257,17 @@ export class TrackEditor {
     this.flip = !this.flip;
     this.rebuildGhost();
     this.pushUi();
+  }
+
+  /**
+   * The working level is where the pointer is projected (clicks land on the cell under the cursor
+   * at that height, raised road included) and where the grid is drawn, so the height being edited
+   * is always visible.
+   */
+  private applyWorkingLevel() {
+    const y = this.level * LEVEL_HEIGHT;
+    this.plane.constant = -y;
+    this.grid.position.y = y + 0.05;
   }
 
   /** Mirror the whole circuit left ↔ right (undoable). */
@@ -277,13 +290,19 @@ export class TrackEditor {
   /** Eyedropper: the hovered piece becomes the current tool (type, rotation, flip, level). */
   private pick() {
     if (!this.hasHover) return;
-    const i = pieceAt(this.track, Math.round(this.hover.x / CELL), Math.round(this.hover.z / CELL));
+    const i = pieceAt(
+      this.track,
+      Math.round(this.hover.x / CELL),
+      Math.round(this.hover.z / CELL),
+      this.level,
+    );
     const p = this.track.pieces[i];
     if (!p) return;
     this.tool = p.type;
     this.rot = p.rot;
     this.flip = !!p.flip;
     this.level = pieceLevel(p);
+    this.applyWorkingLevel();
     this.rebuildGhost();
     this.pushUi();
     this.host.onNote(`Picked ${PIECES[p.type].label}`, "info");
@@ -391,10 +410,16 @@ export class TrackEditor {
     if (this.tool === "level") {
       const lower = erase || this.keys.has("ShiftLeft") || this.keys.has("ShiftRight");
       this.apply(
-        changeLevel(this.track, Math.round(x / CELL), Math.round(z / CELL), lower ? -1 : 1),
+        changeLevel(
+          this.track,
+          Math.round(x / CELL),
+          Math.round(z / CELL),
+          lower ? -1 : 1,
+          this.level,
+        ),
       );
     } else if (erase || this.tool === "erase") {
-      this.apply(eraseAt(this.track, x, z));
+      this.apply(eraseAt(this.track, x, z, this.level));
     } else if (this.tool === "cone" || this.tool === "tires") {
       this.apply(placeProp(this.track, this.tool, x, z));
     } else {
@@ -411,7 +436,11 @@ export class TrackEditor {
 
   /** Level a new piece gets at a cell: joins raised road next to it, else the chosen level. */
   private placementLevel(type: PieceType, cx: number, cz: number): number {
-    const auto = autoLevel(this.track, makePiece(type, cx, cz, this.rot, { flip: this.flip }));
+    const auto = autoLevel(
+      this.track,
+      makePiece(type, cx, cz, this.rot, { flip: this.flip }),
+      this.level,
+    );
     return auto ?? Math.min(this.level, MAX_LEVEL - PIECES[type].rise);
   }
 
@@ -519,11 +548,12 @@ export class TrackEditor {
     let hint: string;
     // Footprint squares under the ghost.
     for (const child of [...ghost.children]) if (child.userData.footprint) ghost.remove(child);
-    const footprint = (cells: [number, number][], color: THREE.Color) => {
+    const footprint = (cells: [number, number][], color: THREE.Color, level = this.level) => {
+      const footY = level * LEVEL_HEIGHT;
       for (const [cx, cz] of cells) {
         const sq = this.ghostFootprint.clone();
         (sq.material as THREE.MeshBasicMaterial).color = color;
-        sq.position.set(cx * CELL - ghost.position.x, 0.07, cz * CELL - ghost.position.z);
+        sq.position.set(cx * CELL - ghost.position.x, footY + 0.07, cz * CELL - ghost.position.z);
         sq.userData.footprint = true;
         ghost.add(sq);
       }
@@ -531,7 +561,7 @@ export class TrackEditor {
 
     if (tool === "level") {
       ghost.position.set(0, 0, 0);
-      const piece = pieceAt(this.track, Math.round(x / CELL), Math.round(z / CELL));
+      const piece = pieceAt(this.track, Math.round(x / CELL), Math.round(z / CELL), this.level);
       const p = this.track.pieces[piece];
       if (p) {
         const level = pieceLevel(p);
@@ -541,7 +571,7 @@ export class TrackEditor {
             ? `Raise ${PIECES[p.type].label} to level ${level + 1}` +
               (level > 0 ? ` · right-click: lower to ${level - 1}` : "")
             : `Top level · right-click: lower to ${level - 1}`;
-        footprint(footprintCells(p), GHOST_OK);
+        footprint(footprintCells(p), GHOST_OK, pieceLevel(p));
       } else {
         hint = "Click a piece to raise it, right-click (or Shift) to lower it";
         ok = false;
@@ -549,12 +579,16 @@ export class TrackEditor {
     } else if (tool === "erase") {
       ghost.position.set(0, 0, 0);
       const prop = propNear(this.track, x, z, 1.2);
-      const piece = pieceAt(this.track, Math.round(x / CELL), Math.round(z / CELL));
+      const piece = pieceAt(this.track, Math.round(x / CELL), Math.round(z / CELL), this.level);
       if (prop >= 0) {
         hint = `Erase ${this.track.props[prop]!.type === "cone" ? "cone" : "tire stack"}`;
       } else if (piece >= 0) {
         hint = `Erase ${PIECES[this.track.pieces[piece]!.type].label}`;
-        footprint(footprintCells(this.track.pieces[piece]!), GHOST_BAD);
+        footprint(
+          footprintCells(this.track.pieces[piece]!),
+          GHOST_BAD,
+          pieceLevel(this.track.pieces[piece]!),
+        );
       } else {
         hint = "Nothing to erase";
         ok = false;

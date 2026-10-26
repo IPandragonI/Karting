@@ -5,7 +5,7 @@ the game only re-centres props and scales models at load time (`src/game/assets.
 
 | File(s) | Source | Author | License |
 | --- | --- | --- | --- |
-| `kart-oobi.glb` (kart chassis; its character is hidden in game) | [Car Kit 3.1](https://kenney.nl/assets/car-kit) | Kenney | [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) |
+| `race.glb` (the player's car and the ghost: an open-wheel single-seater; its red bodywork is repainted per livery at runtime) | [Car Kit 3.1](https://kenney.nl/assets/car-kit) | Kenney | [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/) |
 | `cone.glb` | [Car Kit 3.1](https://kenney.nl/assets/car-kit) | Kenney | CC0 1.0 |
 | `Textures/colormap.png` (shared palette texture of the Car Kit models) | [Car Kit 3.1](https://kenney.nl/assets/car-kit) | Kenney | CC0 1.0 |
 | `treeLarge.glb`, `treeSmall.glb`, `tentClosed.glb`, `grandStand.glb`, `grandStandCovered.glb`, `flagCheckers.glb`, `flagGreen.glb`, `flagRed.glb`, `billboard.glb`, `billboardLow.glb`, `fenceStraight.glb`, `lightPostLarge.glb`, `bannerTowerGreen.glb`, `bannerTowerRed.glb`, `pitsGarage.glb`, `pitsGarageClosed.glb`, `pitsOffice.glb` | [Racing Kit](https://kenney.nl/assets/racing-kit) | Kenney | CC0 1.0 |
@@ -42,5 +42,9 @@ use this content for personal, educational, and commercial purposes. Support by 
   found. The closest, [racing car engine sound loops](https://opengameart.org/content/racing-car-engine-sound-loops)
   (OpenGameArt, CC0), are car engines and their comment thread questions the source sample, so
   the engine is synthesized instead.
-- The other Car Kit karts (`kart-oodi`, `kart-ooli`, `kart-oopi`, `kart-oozi`) share the same
-  chassis and only differ by the character, which the game replaces, so they are no longer shipped.
+- Car Kit karts (`kart-oobi` and its variants): the previous vehicle. Replaced by the Car Kit
+  `race` single-seater, which reads better from every camera, is lighter (1 952 vs 2 884
+  triangles) and has an open cockpit for the driver and the first-person view. No longer shipped.
+- Car Kit `race-future` (closed sci-fi cockpit, less karting) and the Racing Kit `raceCar*`
+  models (their nodes carry baked, odd transforms; separate materials instead of the shared
+  palette): evaluated for the vehicle change, not used.

@@ -15,6 +15,8 @@ import {
   GRID_LIMIT,
   MAX_PIECES,
   MAX_PROPS,
+  levelRange,
+  levelsClear,
   pieceLevel,
   worldConnectors,
   type PieceData,
@@ -51,10 +53,42 @@ export function makePiece(
   return piece;
 }
 
-/** Index of the piece covering a cell, or −1. */
-export function pieceAt(track: TrackData, cx: number, cz: number): number {
+/** Indices of every piece covering a cell (several where roads pass over each other). */
+export function piecesAt(track: TrackData, cx: number, cz: number): number[] {
   const key = cellKey(cx, cz);
-  return track.pieces.findIndex((p) => footprintCells(p).some(([x, z]) => cellKey(x, z) === key));
+  const out: number[] = [];
+  track.pieces.forEach((p, i) => {
+    if (footprintCells(p).some(([x, z]) => cellKey(x, z) === key)) out.push(i);
+  });
+  return out;
+}
+
+/** How far a piece's levels are from `level` (0 when it spans it). */
+function levelDistance(p: PieceData, level: number): number {
+  const [lo, hi] = levelRange(p);
+  return level < lo ? lo - level : level > hi ? level - hi : 0;
+}
+
+/**
+ * The piece covering a cell, or −1. Where several share the cell, the one at (or nearest to)
+ * `level`, the editor's working level; without it, the top one.
+ */
+export function pieceAt(track: TrackData, cx: number, cz: number, level?: number): number {
+  let best = -1;
+  for (const i of piecesAt(track, cx, cz)) {
+    const p = track.pieces[i]!;
+    if (best < 0) {
+      best = i;
+      continue;
+    }
+    const b = track.pieces[best]!;
+    if (level === undefined) {
+      if (levelRange(p)[1] > levelRange(b)[1]) best = i;
+    } else if (levelDistance(p, level) < levelDistance(b, level)) {
+      best = i;
+    }
+  }
+  return best;
 }
 
 export function checkPiecePlacement(
@@ -65,10 +99,11 @@ export function checkPiecePlacement(
   if (cells.some(([x, z]) => Math.abs(x) > GRID_LIMIT || Math.abs(z) > GRID_LIMIT)) {
     return { ok: false, reason: "Outside the build area" };
   }
+  // Only pieces too close vertically are in the way; a road a full level above or below can
+  // share the cells (bridges, overpasses).
   const hit = new Set<number>();
   for (const [x, z] of cells) {
-    const i = pieceAt(track, x, z);
-    if (i >= 0) hit.add(i);
+    for (const i of piecesAt(track, x, z)) if (!levelsClear(track.pieces[i]!, piece)) hit.add(i);
   }
   if (hit.size > 1) return { ok: false, reason: "Overlaps several pieces (erase them first)" };
   const level = pieceLevel(piece);
@@ -124,8 +159,8 @@ export function placePiece(
   return { ok: true, track: next, note };
 }
 
-export function erasePieceAt(track: TrackData, cx: number, cz: number): EditResult {
-  const i = pieceAt(track, cx, cz);
+export function erasePieceAt(track: TrackData, cx: number, cz: number, level?: number): EditResult {
+  const i = pieceAt(track, cx, cz, level);
   if (i < 0) return { ok: false, reason: "Nothing to erase here" };
   const next = cloneTrack(track);
   next.pieces.splice(i, 1);
@@ -133,42 +168,64 @@ export function erasePieceAt(track: TrackData, cx: number, cz: number): EditResu
 }
 
 /**
- * Level at which a new piece joins the road next to it: the first of its two ends that meets a
- * neighbour's open end decides. Null when it touches no road (the editor's chosen level applies).
+ * Level at which a new piece joins the road next to it: any neighbour end facing one of its two
+ * ends proposes a level; where roads at several levels face it (under and over a bridge), the
+ * one closest to `prefer` (the editor's working level) wins. Null when it touches no road (the
+ * editor's chosen level applies).
  */
-export function autoLevel(track: TrackData, piece: PieceData): number | null {
+export function autoLevel(track: TrackData, piece: PieceData, prefer = 0): number | null {
   const rise = PIECES[piece.type].rise;
   const own = worldConnectors({ ...piece, y: 0 });
+  let best: number | null = null;
   for (const k of [0, 1] as const) {
     const c = own[k];
     const [dx, dz] = DIR_VEC[c.dir];
     const nx = c.cell[0] + dx;
     const nz = c.cell[1] + dz;
-    const i = pieceAt(track, nx, nz);
-    if (i < 0) continue;
     const opposite = rotateDir(c.dir, 2);
-    const match = worldConnectors(track.pieces[i]!).find(
-      (o) => o.cell[0] === nx && o.cell[1] === nz && o.dir === opposite,
-    );
-    if (!match) continue;
-    const level = match.level - (k === 1 ? rise : 0);
-    if (level >= 0 && level + rise <= MAX_LEVEL) return level;
+    for (const i of piecesAt(track, nx, nz)) {
+      for (const o of worldConnectors(track.pieces[i]!)) {
+        if (o.cell[0] !== nx || o.cell[1] !== nz || o.dir !== opposite) continue;
+        const level = o.level - (k === 1 ? rise : 0);
+        if (level < 0 || level + rise > MAX_LEVEL) continue;
+        if (best === null || Math.abs(level - prefer) < Math.abs(best - prefer)) best = level;
+      }
+    }
   }
-  return null;
+  return best;
 }
 
-/** Raises (delta > 0) or lowers the piece covering a cell by whole levels. */
-export function changeLevel(track: TrackData, cx: number, cz: number, delta: number): EditResult {
-  const i = pieceAt(track, cx, cz);
+/**
+ * Raises (delta > 0) or lowers by whole levels the piece covering a cell (the one nearest the
+ * editor's working `level` where several share it). It may not move into another piece's
+ * levels: a road keeps a full level of clearance from one passing over or under it.
+ */
+export function changeLevel(
+  track: TrackData,
+  cx: number,
+  cz: number,
+  delta: number,
+  level?: number,
+): EditResult {
+  const i = pieceAt(track, cx, cz, level);
   if (i < 0) return { ok: false, reason: "No piece here" };
   const p = track.pieces[i]!;
-  const level = pieceLevel(p) + delta;
-  if (level < 0) return { ok: false, reason: "Already on the ground" };
-  if (level + PIECES[p.type].rise > MAX_LEVEL)
+  const target = pieceLevel(p) + delta;
+  if (target < 0) return { ok: false, reason: "Already on the ground" };
+  if (target + PIECES[p.type].rise > MAX_LEVEL)
     return { ok: false, reason: `Already at the top level (${MAX_LEVEL})` };
+  const moved = makePiece(p.type, p.x, p.z, p.rot, { y: target, flip: p.flip });
+  const blocking = footprintCells(moved).some(([x, z]) =>
+    piecesAt(track, x, z).some((j) => j !== i && !levelsClear(track.pieces[j]!, moved)),
+  );
+  if (blocking)
+    return {
+      ok: false,
+      reason: delta > 0 ? "A road passes just above" : "A road passes just below",
+    };
   const next = cloneTrack(track);
-  next.pieces[i] = makePiece(p.type, p.x, p.z, p.rot, { y: level, flip: p.flip });
-  return { ok: true, track: next, note: `Level ${level}` };
+  next.pieces[i] = moved;
+  return { ok: true, track: next, note: `Level ${target}` };
 }
 
 /**
@@ -225,15 +282,18 @@ export function placeProp(track: TrackData, type: PropType, x: number, z: number
   return { ok: true, track: next };
 }
 
-/** Erases the prop under the point if any, otherwise the piece under it. */
-export function eraseAt(track: TrackData, x: number, z: number): EditResult {
+/**
+ * Erases the prop under the point if any, otherwise the piece under it (at or nearest to the
+ * editor's working `level` where roads cross).
+ */
+export function eraseAt(track: TrackData, x: number, z: number, level?: number): EditResult {
   const prop = propNear(track, x, z, 1.2);
   if (prop >= 0) {
     const next = cloneTrack(track);
     next.props.splice(prop, 1);
     return { ok: true, track: next };
   }
-  return erasePieceAt(track, Math.round(x / CELL), Math.round(z / CELL));
+  return erasePieceAt(track, Math.round(x / CELL), Math.round(z / CELL), level);
 }
 
 /** Snapshot-based undo history. Tracks are small, so whole copies are simplest and safest. */
