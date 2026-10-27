@@ -128,6 +128,17 @@ describe("RaceManager", () => {
     expect(r.bestLap).toBeCloseTo(29);
   });
 
+  it("gives lap deltas against the record (the ghost), not the session best", () => {
+    // Back on a circuit lapped before: a session best that stays off the record.
+    const r = timing(20, 25);
+    lap(r, 20, 30);
+    const l2 = lapOf(lap(r, 20, 28));
+    expect(l2).toMatchObject({ type: "lap", best: true, record: false });
+    if (l2?.type === "lap") expect(l2.delta).toBeCloseTo(3);
+    expect(r.recordLap).toBeCloseTo(25);
+    expect(r.bestLap).toBeCloseTo(28);
+  });
+
   it("keeps session bests across restarts and ignores everything when off", () => {
     const r = timing();
     lap(r, 20, 25);

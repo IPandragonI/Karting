@@ -165,7 +165,7 @@ export class CameraRig {
   private initialized = false;
   private shake = 0;
   private aspect = 1;
-  private mode: CameraMode = "elevated";
+  private mode: CameraMode = "first";
   /** Player-chosen landscape field of view per mode (portrait keeps the mode's extra width). */
   private readonly fovOverride: Partial<Record<CameraMode, number>> = {};
   /** A settings change jumps straight to the new lens instead of easing into it. */

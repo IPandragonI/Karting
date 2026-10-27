@@ -218,7 +218,9 @@ export class RaceManager {
     this.lastSectors = this.sectors;
     const previousBest = this.bestLap ?? this.recordLap;
     const best = previousBest === null || time < previousBest;
-    const delta = previousBest === null ? null : time - previousBest;
+    // Against the record, like the live delta (the ghost is the record lap): a session best that
+    // stays off the record still shows how far off it is.
+    const delta = this.recordLap === null ? null : time - this.recordLap;
     if (this.bestLap === null || time < this.bestLap) this.bestLap = time;
     const record = this.recordLap === null || time < this.recordLap;
     if (record) this.recordLap = time;

@@ -108,12 +108,8 @@ export class KartView {
     });
     // The driver keeps its real size whatever the car's scale, helmet at the cockpit point; the
     // lean pivot sits at seat level so leaning tilts the shoulders, not the whole figure.
-    this.driver = this.buildDriver(livery);
     const k = DRIVER_UNITS / VEHICLE.scale;
-    this.driver.scale.setScalar(k);
-    this.driver.position.set(0, VEHICLE.helmet.y - SEAT_Y - HELMET.y * k, -HELMET.z * k);
     this.lean.position.set(0, SEAT_Y, VEHICLE.helmet.z);
-    this.lean.add(this.driver);
     kart.add(this.lean);
     this.body.add(kart);
     this.root.add(this.body);
@@ -137,132 +133,6 @@ export class KartView {
     this.root.add(this.blob);
   }
 
-  /**
-   * Seated driver in kart-model units (the kart group is scaled by KART_SCALE): suit, arms reaching
-   * for the steering wheel, and a smooth helmet with a dark visor facing forward (+Z).
-   */
-  private buildDriver(livery: string): THREE.Group {
-    const g = new THREE.Group();
-    const suitColor = new THREE.Color(livery).multiplyScalar(0.8);
-    const suit = new THREE.MeshStandardMaterial({ color: suitColor, roughness: 0.8 });
-    const helmet = new THREE.MeshStandardMaterial({
-      color: livery,
-      roughness: 0.35,
-      metalness: 0.1,
-    });
-    const stripe = new THREE.MeshStandardMaterial({ color: "#f4f2ec", roughness: 0.4 });
-    const visor = new THREE.MeshStandardMaterial({
-      color: "#151b24",
-      roughness: 0.15,
-      metalness: 0.4,
-    });
-    const glove = new THREE.MeshStandardMaterial({ color: "#2a2c31", roughness: 0.9 });
-    this.owned.materials.push(suit, helmet, stripe, visor, glove);
-    const geo = <T extends THREE.BufferGeometry>(x: T) => {
-      this.owned.geometries.push(x);
-      return x;
-    };
-    const add = (
-      geometry: THREE.BufferGeometry,
-      material: THREE.Material,
-      setup: (m: THREE.Mesh) => void,
-    ) => {
-      const m = new THREE.Mesh(geometry, material);
-      m.castShadow = true;
-      setup(m);
-      g.add(m);
-      return m;
-    };
-
-    // Torso, leaning back into the seat.
-    add(geo(new THREE.CapsuleGeometry(0.13, 0.16, 6, 12)), suit, (m) => {
-      m.position.set(0, 0.5, -0.17);
-      m.rotation.x = -0.25;
-      m.scale.set(1.15, 1, 0.85);
-    });
-    // Arms: from the shoulders down to the steering wheel.
-    const arm = geo(new THREE.CapsuleGeometry(0.045, 0.22, 4, 8));
-    const hand = geo(new THREE.SphereGeometry(0.05, 10, 8));
-    for (const side of [-1, 1]) {
-      const shoulder = new THREE.Vector3(side * 0.15, 0.6, -0.12);
-      const grip = new THREE.Vector3(side * 0.11, 0.48, 0.14);
-      const mid = shoulder.clone().add(grip).multiplyScalar(0.5);
-      const dir = grip.clone().sub(shoulder).normalize();
-      add(arm, suit, (m) => {
-        m.position.copy(mid);
-        m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
-      });
-      add(hand, glove, (m) => m.position.copy(grip));
-    }
-    // Helmet with a white stripe and a visor on the front.
-    const head = new THREE.Group();
-    head.position.set(0, 0.79, -0.13);
-    g.add(head);
-    const shell = new THREE.Mesh(geo(new THREE.SphereGeometry(0.135, 20, 14)), helmet);
-    shell.scale.set(1, 0.95, 1.1);
-    shell.castShadow = true;
-    head.add(shell);
-    const band = new THREE.Mesh(geo(new THREE.TorusGeometry(0.128, 0.018, 6, 24)), stripe);
-    band.rotation.y = Math.PI / 2;
-    band.scale.set(1, 1, 1.1);
-    head.add(band);
-    const vis = new THREE.Mesh(
-      geo(
-        new THREE.SphereGeometry(
-          0.139,
-          20,
-          8,
-          Math.PI * 0.12,
-          Math.PI * 0.76,
-          Math.PI * 0.36,
-          Math.PI * 0.2,
-        ),
-      ),
-      visor,
-    );
-    // Sphere segments start at −X and sweep through +Z: centre the visor on the front.
-    vis.scale.set(1, 0.95, 1.1);
-    head.add(vis);
-    return this.mergeByMaterial(g, new Set([suit, helmet]));
-  }
-
-  /**
-   * Bakes the driver's parts into one mesh per material (9 meshes → 5 draw calls), and lets only
-   * the large parts cast shadows: visor, stripe and gloves are too small to show in the shadow
-   * map, yet each one would cost an extra draw in the shadow pass.
-   */
-  private mergeByMaterial(g: THREE.Group, shadowCasters: Set<THREE.Material>): THREE.Group {
-    g.updateMatrixWorld(true);
-    const parts = new Map<THREE.Material, THREE.BufferGeometry[]>();
-    g.traverse((o) => {
-      const mesh = o as THREE.Mesh;
-      if (!mesh.isMesh) return;
-      const mat = mesh.material as THREE.Material;
-      const list = parts.get(mat) ?? [];
-      list.push(mesh.geometry.clone().applyMatrix4(mesh.matrixWorld));
-      parts.set(mat, list);
-    });
-    const merged = new THREE.Group();
-    for (const [mat, list] of parts) {
-      const geometry = mergeGeometries(list)!;
-      for (const piece of list) piece.dispose();
-      this.owned.geometries.push(geometry);
-      const mesh = new THREE.Mesh(geometry, mat);
-      mesh.castShadow = shadowCasters.has(mat);
-      merged.add(mesh);
-    }
-    // The source geometries are no longer needed.
-    g.traverse((o) => {
-      const mesh = o as THREE.Mesh;
-      if (mesh.isMesh) mesh.geometry.dispose();
-    });
-    return merged;
-  }
-
-  /** Hide the driver for the first-person camera (the camera sits in their helmet). */
-  setDriverVisible(visible: boolean) {
-    this.driver.visible = visible;
-  }
 
   /** World positions of the rear wheel contact patches (for skid marks and smoke). */
   rearContacts(out: [THREE.Vector3, THREE.Vector3]) {

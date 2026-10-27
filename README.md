@@ -1,8 +1,9 @@
 # Low-Poly Karting
 
 A small browser karting game: arcade drift physics, time trials with sector splits, a live delta
-and a best-lap ghost, a grid track editor with elevation and bridges, a verified leaderboard and a
-community track library. Inspired by
+and a best-lap ghost, a grid track editor with elevation and bridges, and nine built-in circuits
+(Monaco, Spa, Monza and Suzuka among them).
+Everything runs in the browser (no backend). Inspired by
 [mrdoob/Starter-Kit-Racing](https://github.com/mrdoob/Starter-Kit-Racing).
 
 Next.js (App Router) · React · TypeScript · Tailwind CSS + daisyUI · three.js · crashcat physics.
@@ -16,22 +17,8 @@ pnpm check        # lint + typecheck + unit tests
 pnpm build && pnpm start
 ```
 
-Requires Node.js ≥ 22.13 (the server uses the built-in `node:sqlite`; no database to install).
-
-### Server and data
-
-The leaderboard and the track library run in the same Next.js server (`src/app/api/[...path]`,
-logic in `src/server/`). Data is one SQLite file, created on first use:
-
-- `KARTING_DB` sets its path (default `data/karting.sqlite`, git-ignored). Back it up by copying the
-  file while the server is stopped.
-- It needs a persistent disk: a long-running Node server (VPS, container with a volume, `pnpm start`
-  behind a reverse proxy). Serverless hosts with an ephemeral filesystem would lose the data.
-- Rate limits are kept in memory per process and keyed on the client address; behind a proxy, make
-  sure it sets `X-Forwarded-For`. Run a single server process (or move the limits and the database
-  to shared services before scaling out).
-- Stored: an anonymous player id, the hash of its secret token, the nickname, published circuits,
-  verified records. No IP address, e-mail or account.
+Static front end only: no server, database or account. Records, ghosts, settings and the last
+circuit are kept in the browser's `localStorage`.
 
 ## Play
 
@@ -66,24 +53,17 @@ shortcuts; best lap saved per circuit). An incomplete circuit is driven freely w
 - Records, sector bests and ghosts are keyed by the circuit's layout: any change in the editor
   (piece, rotation, level) starts fresh records; an unchanged layout keeps them.
 
-**HUD**: settings and tools top left (menu, editor, camera, ghost, sound, settings, leaderboard,
-track library, reset), the timer top right (lap, time, live delta, best lap, S1–S3 bars), the map
+**HUD**: settings and tools top left (menu, editor, camera, ghost, sound, settings, circuits,
+reset), the timer top right (lap, time, live delta, best lap, S1–S3 bars), the map
 bottom right (your heading as an arrow, the ghost as a ring, raised road drawn over the road it
 crosses), speed at the bottom. Sound starts on the first key press or tap.
 
-**Leaderboard** (trophy button): verified best laps per circuit. Pick a nickname (a display label,
-up to 16 characters); when you beat your best on a circuit that is in the library, the lap is sent
-for verification. The game sends the inputs of the session (every physics step), not a time: the
-server replays them through the same deterministic simulation (`src/game/sim`) on the published
-layout and records the time it computes, so edited timers or invented times are rejected. This
-is strong but not cheat-proof: a crafted input sequence (a tool-assisted lap) replays as valid.
-Sessions longer than 10 minutes cannot be verified (restart the lap).
-
-**Track library** (book button): official and community circuits, sorted by popularity, date,
-likes or name, or just yours. Preview, play, like, copy a link (`#lib=<id>`), report. Publish the
-circuit you are driving (it must be a valid closed circuit); published versions never change, and
-publishing your edits creates a new version with its own leaderboard. Earlier versions stay
-playable.
+**Circuits** (map button): pick one of the built-in circuits, with its layout and your best lap
+on it. Originals: Pinewood Park (the default), Harbour Oval (long straights and chicanes),
+Crossover (a figure of eight over a bridge), Snake Valley (three hairpins) and Summit Ring (two
+levels up and down). Historic, redrawn by hand on the grid (the order and character of the famous
+corners, not the exact geometry): Monaco, Spa-Francorchamps, Monza and Suzuka (with its bridge).
+They are also offered as starting points in the editor's reset menu (`src/game/track/circuits.ts`).
 
 **Settings** (Menu → Settings, saved in the browser): field of view for the chase and
 first-person cameras (60–110°, applied live), master volume, ghost on/off, and key remapping (two
@@ -126,10 +106,8 @@ The simulation lives in `src/game` and has no React dependency. React components
 | `Game.ts`                       | Lifecycle, the single animation loop, fixed 60 Hz physics steps with render interpolation, screens, graphics quality                         |
 | `Vehicle.ts`                    | Arcade kart model (pure): forward/lateral velocity split, saturating tire grip, speed-dependent steering, stable drift                       |
 | `Physics.ts`                    | crashcat world: ground, wall colliders, cones, kart sphere (translation only, heading owned by `Vehicle`)                                    |
-| `sim/Simulation.ts`             | The deterministic driving simulation (kart, physics, ground following, race progress), shared by the game and the server                     |
-| `sim/trace.ts`, `sim/replay.ts` | Quantized input traces (run-length encoded) and their replay, for lap verification                                                           |
-| `online.ts`                     | Browser side of the API: anonymous player token, leaderboard, track library                                                                  |
-| `../server/`                    | API (`api.ts`) and SQLite storage (`db.ts`) for the leaderboard and the library                                                              |
+| `sim/Simulation.ts`             | The deterministic driving simulation (kart, physics, ground following, race progress), shared by the game and the tests                      |
+| `sim/trace.ts`, `sim/replay.ts` | Quantized input traces (run-length encoded) and their replay, for the determinism tests                                                      |
 | `Camera.ts`                     | Follow-mode registry (elevated, chase, first person) plus orbit and editor views                                                             |
 | `KartView.ts`                   | Kart chassis animation and the procedural driver                                                                                             |
 | `track/pieces.ts`               | Piece definitions: footprint, centerline (lines and arcs), connectors, rise (ramps)                                                          |

@@ -228,7 +228,7 @@ export function buildTrack(
 ): BuiltTrack {
   const group = new THREE.Group();
   group.name = "track";
-  // Colliders come from the shared pure builder (the server's lap replay uses the same one).
+  // Colliders come from the shared pure builder (the simulation uses the same one).
   const walls: WallSegment[] = trackWalls(track, layout);
   const lights: THREE.Mesh[] = [];
   const geometries: THREE.BufferGeometry[] = [];

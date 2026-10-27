@@ -90,8 +90,8 @@ export class Physics {
       // Discrete, not LINEAR_CAST: the kart moves at most 0.4 m per step, well under its 0.7 m
       // radius, so it cannot tunnel through a wall, and crashcat 0.0.5's CCD response reuses a
       // module-level constraint whose accumulated impulse is never reset. That leaked between
-      // sessions and made identical inputs give different laps, which the leaderboard's server
-      // replay must not allow (see sim/Simulation.ts).
+      // sessions and made identical inputs give different laps, which a deterministic
+      // simulation must not allow (see sim/Simulation.ts).
       motionQuality: MotionQuality.DISCRETE,
       allowSleeping: false,
     });

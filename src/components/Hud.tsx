@@ -1,17 +1,16 @@
 "use client";
 
 import {
-  BookOpen,
   Car,
   ChevronDown,
   Eye,
   Ghost,
+  Map as MapIcon,
   Menu,
   Mountain,
   Pencil,
   RotateCcw,
   Settings,
-  Trophy,
   Volume2,
   VolumeX,
 } from "lucide-react";
@@ -156,7 +155,8 @@ function TimerCard() {
   }, [game]);
 
   const lastLap = race.lastLap ?? race.lastLap;
-  const best = race.bestLap ?? race.recordLap;
+  // The all-time record, the lap the ghost replays (the session best is never faster).
+  const best = race.recordLap;
 
   return (
     <div className="hud-card pointer-events-auto w-44 px-2.5 py-1.5 sm:w-60 sm:px-3 sm:py-2">
@@ -319,19 +319,11 @@ function Controls() {
       </button>
       <button
         className={btn}
-        onClick={() => game.openOverlay("leaderboard")}
-        aria-label="Leaderboard"
-        title="Leaderboard"
+        onClick={() => game.openOverlay("circuits")}
+        aria-label="Circuits"
+        title="Circuits"
       >
-        <Trophy className="size-4" />
-      </button>
-      <button
-        className={btn}
-        onClick={() => game.openOverlay("library")}
-        aria-label="Track library"
-        title="Track library"
-      >
-        <BookOpen className="size-4" />
+        <MapIcon className="size-4" />
       </button>
       <button
         className={btn}

@@ -2,14 +2,13 @@
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Game, type Overlay } from "@/game/Game";
+import { CircuitsDialog } from "./CircuitsDialog";
 import { EditorToolbar } from "./EditorToolbar";
 import { GameContext } from "./useGame";
 import { Hud } from "./Hud";
 import { PerfOverlay } from "./PerfOverlay";
 import { LoadingScreen } from "./LoadingScreen";
 import { PauseMenu } from "./PauseMenu";
-import { LeaderboardDialog } from "./LeaderboardDialog";
-import { LibraryDialog } from "./LibraryDialog";
 import { SettingsDialog } from "./SettingsDialog";
 
 export function GameView() {
@@ -80,8 +79,7 @@ function OverlayPanels({ game, overlay }: { game: Game; overlay: Overlay | null 
   return (
     <>
       <SettingsDialog open={overlay === "settings"} onClose={close} />
-      <LeaderboardDialog open={overlay === "leaderboard"} onClose={close} />
-      <LibraryDialog open={overlay === "library"} onClose={close} />
+      <CircuitsDialog open={overlay === "circuits"} onClose={close} />
     </>
   );
 }

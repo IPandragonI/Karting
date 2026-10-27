@@ -20,7 +20,7 @@ import {
   Undo2,
 } from "lucide-react";
 import { useState } from "react";
-import { createDefaultTrack } from "@/game/track/defaultTrack";
+import { CIRCUITS } from "@/game/track/circuits";
 import { MAX_LEVEL } from "@/game/track/pieces";
 import type { EditorTool } from "@/game/TrackEditor";
 import { ShareDialog } from "./ShareDialog";
@@ -329,11 +329,13 @@ export function EditorToolbar() {
                     <History className="size-4" /> Revert unsaved changes
                   </button>
                 </li>
-                <li>
-                  <button onClick={() => game.editorReplace(createDefaultTrack())}>
-                    <RotateCcw className="size-4" /> Reset to default circuit
-                  </button>
-                </li>
+                {CIRCUITS.map((c) => (
+                  <li key={c.id}>
+                    <button onClick={() => game.editorReplace(c.create())}>
+                      <RotateCcw className="size-4" /> Start from “{c.name}”
+                    </button>
+                  </li>
+                ))}
                 <li>
                   <button
                     onClick={() =>

@@ -2,7 +2,7 @@ import { analyzeTrack, buildRacePath, type TrackData } from "./Track";
 
 // Thumbnails: the circuit's centerline as SVG path data in a 100 × 100 view box, one path per
 // elevation level so a bridge can be drawn over the road it crosses. Generated from the same
-// race path the game drives (no image upload, no rendering on the server), a few hundred bytes.
+// race path the game drives (no image, no rendering), a few hundred bytes.
 
 export type TrackPreview = { levels: { level: number; d: string }[] };
 

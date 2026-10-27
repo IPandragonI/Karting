@@ -30,20 +30,9 @@ import {
 } from "./Ghost";
 import { GhostView } from "./GhostView";
 import { KartView } from "./KartView";
-import {
-  ApiError,
-  countPlay,
-  getNickname,
-  getTrack,
-  libraryFromHash,
-  publishTrack,
-  setNickname,
-  submitLap,
-  updateTrack,
-} from "./online";
 import { KART_RADIUS } from "./Physics";
 import { canonicalTrack, Simulation, STEP } from "./sim/Simulation";
-import { quantizeInput, TraceRecorder } from "./sim/trace";
+import { quantizeInput } from "./sim/trace";
 import { RaceManager, type RaceEvent, type RacePhase, type SectorResult } from "./RaceManager";
 import {
   createForest,
@@ -56,7 +45,6 @@ import {
 } from "./Scenery";
 import { Store } from "./store";
 import { createDefaultTrack } from "./track/defaultTrack";
-import { layoutHash } from "./track/layoutHash";
 import { LEVEL_HEIGHT, ROAD_HALF } from "./track/pieces";
 import {
   analyzeTrack,
@@ -120,15 +108,6 @@ export type UiState = {
   race: RaceUi;
   /** Panel open over the game, if any. */
   overlay: Overlay | null;
-  /** Layout identity of the circuit being driven (leaderboard key). */
-  layout: string;
-  /** Library circuit this layout was loaded from, if any. */
-  library: LibraryRef | null;
-  /** Leaderboard nickname (null until chosen). */
-  nickname: string | null;
-  submission: Submission;
-  /** A personal best of this session waits for a nickname to be submitted. */
-  pendingSubmit: boolean;
   /** Player setting: show the best-lap ghost. */
   ghost: boolean;
   /** Comfort settings (persisted). */
@@ -183,30 +162,11 @@ export type FrameInfo = {
   ghostZ: number;
 };
 
-/** State of the last leaderboard submission, for the HUD and the leaderboard panel. */
-export type Submission =
-  | { state: "idle" }
-  | { state: "submitting"; time: number }
-  | { state: "verified"; time: number; rank: number; improved: boolean }
-  | { state: "rejected"; time: number; message: string }
-  | { state: "error"; time: number; message: string };
-
-/** Where the circuit being driven comes from in the track library (null: local only). */
-export type LibraryRef = {
-  id: string;
-  revision: number;
-  layout: string;
-  name: string;
-  creator: string | null;
-  official: boolean;
-  mine: boolean;
-};
-
 /** Panels opened over the game from the HUD (the game pauses underneath). */
-export type Overlay = "settings" | "leaderboard" | "library";
+export type Overlay = "settings" | "circuits";
 
 // Fixed 60 Hz physics (STEP, from the simulation) with interpolated rendering. The kart model is
-// step-size independent, and a fixed step is also what makes a session replayable on the server.
+// step-size independent, and a fixed step keeps a session deterministic (replayable).
 const MAX_STEPS = 5;
 const BEST_KEY = "karting:best:";
 const LIVERY_KEY = "karting:livery";
@@ -222,8 +182,11 @@ const GHOST_KEY = "karting:ghost:";
 const SHOW_GHOST_KEY = "karting:showGhost";
 const FOV_KEY = "karting:fov";
 const BINDINGS_KEY = "karting:bindings";
-/** Ghosts kept in storage (most recent circuits); older ones are dropped. */
-const MAX_GHOSTS = 8;
+/**
+ * Ghosts kept in storage (most recent circuits); older ones are dropped. About 25 KB per minute
+ * of lap, and enough for every built-in circuit plus the player's own.
+ */
+const MAX_GHOSTS = 24;
 /** How long the finished lap's splits stay on screen after the line (s). */
 const SPLIT_HOLD = 4;
 
@@ -313,11 +276,6 @@ export class Game {
       bestSectors: [null, null, null],
     },
     overlay: null,
-    layout: "",
-    library: null,
-    nickname: null,
-    submission: { state: "idle" },
-    pendingSubmit: false,
     ghost: true,
     ghostTime: null,
     fov: { chase: defaultFov("chase"), first: defaultFov("first") },
@@ -366,10 +324,8 @@ export class Game {
   private propGeometry: THREE.BufferGeometry[] = [];
   private coneMeshes: { mesh: THREE.Object3D; body: Simulation["cones"][number]["body"] }[] = [];
 
-  /** The driving simulation of the current session (shared with the server's lap replay). */
+  /** The driving simulation of the current session. */
   private sim: Simulation | null = null;
-  /** Every input of the session, for leaderboard verification. */
-  private readonly trace = new TraceRecorder();
   private pendingReset = false;
   private kart: KartState = createKartState();
   private kartView: KartView | null = null;
@@ -426,10 +382,6 @@ export class Game {
   private lastBrake = 0;
   private disposed = false;
   private pendingToast: { text: string; tone: Toast["tone"] } | null = null;
-  /** Library circuit to open once loading is done (from a #lib= share link). */
-  private pendingLibrary: { id: string; revision?: number } | null = null;
-  /** Best lap of the session not submitted yet (no nickname at the time). */
-  private unsubmitted: { layout: string; lap: number; time: number; trace: string } | null = null;
   private readonly frameListeners = new Set<(f: FrameInfo) => void>();
   private readonly frame: FrameInfo = {
     speed: 0,
@@ -587,7 +539,6 @@ export class Game {
    * editor, then the default circuit.
    */
   initialTrack(): TrackData | undefined {
-    this.pendingLibrary = libraryFromHash(window.location.hash);
     const shared = trackFromHash(window.location.hash);
     if (shared?.ok) {
       this.pendingToast = { text: `Loaded shared circuit “${shared.track.name}”`, tone: "success" };
@@ -636,9 +587,6 @@ export class Game {
     this.loadTrack(initialTrack ?? this.track);
     this.drive();
     if (this.pendingToast) this.toast(this.pendingToast.text, this.pendingToast.tone, 4);
-    void getNickname().then((nickname) => this.store.set({ nickname }));
-    if (this.pendingLibrary)
-      void this.loadLibraryTrack(this.pendingLibrary.id, this.pendingLibrary.revision);
     this.lastTime = performance.now();
     this.raf = requestAnimationFrame(this.loop);
   }
@@ -740,9 +688,17 @@ export class Game {
     }
     const raceable = isRaceable(this.layout);
     const id = trackId(this.track);
+    this.ghostLap = raceable ? decodeGhost(read(GHOST_KEY + id)) : null;
+    let record = readNumber(BEST_KEY + id);
+    // The ghost is the record lap: a ghost faster than the stored record (record lost or never
+    // written) brings the record back, so the "Best" time and the ghost agree.
+    if (this.ghostLap && (record === null || this.ghostLap.time < record)) {
+      record = this.ghostLap.time;
+      write(BEST_KEY + id, String(record));
+    }
     this.race = new RaceManager(
       this.layout.order.length || 1,
-      readNumber(BEST_KEY + id),
+      record,
       this.path.totalLength,
       readSectors(SECTORS_KEY + id),
     );
@@ -753,7 +709,6 @@ export class Game {
       this.line.z,
       this.line.y,
     ).distance;
-    this.ghostLap = raceable ? decodeGhost(read(GHOST_KEY + id)) : null;
     this.reference = this.buildReferenceCurve(this.ghostLap);
     this.splitHold = 0;
     this.store.set({
@@ -762,7 +717,6 @@ export class Game {
       race: this.raceUi(),
       ghostTime: this.ghostLap?.time ?? null,
       issues: this.layout.issues,
-      layout: layoutHash(this.track),
     });
     this.buildPhysics();
     // The gantry shows green: the session is always "live".
@@ -798,7 +752,7 @@ export class Game {
 
   /**
    * The driving simulation for the current circuit (physics world, kart, race progress), plus the
-   * meshes of its props. The simulation is shared with the leaderboard server's lap replay.
+   * meshes of its props. The simulation is the same one the tests replay.
    */
   private buildPhysics() {
     const sim = new Simulation(this.track, {
@@ -877,7 +831,6 @@ export class Game {
     if (this.kartView || !this.models) return;
     const livery = LIVERIES.find((l) => l.id === this.store.get().livery) ?? LIVERIES[0];
     this.kartView = new KartView(this.models[VEHICLE.model], livery.color);
-    this.kartView.setDriverVisible(this.store.get().camera !== "first");
     this.scene.add(this.kartView.root);
     this.kartView.update(
       this.kart,
@@ -955,7 +908,6 @@ export class Game {
   setCamera(camera: CameraMode) {
     this.store.set({ camera });
     write(CAMERA_KEY, camera);
-    this.kartView?.setDriverVisible(camera !== "first");
     this.rig.cut();
   }
 
@@ -993,7 +945,6 @@ export class Game {
   /** Put the kart on the grid and start (or restart) the session: out lap, then timed laps. */
   private drive() {
     this.buildPhysics();
-    this.trace.clear();
     this.pendingReset = false;
     this.skids.clear();
     this.particles.clear();
@@ -1122,120 +1073,29 @@ export class Game {
     return cloneTrack(this.editor?.track ?? this.track);
   }
 
-  // ─── Leaderboard & library ───────────────────────────────────────────────
+  // ─── Circuits ────────────────────────────────────────────────────────────
 
-  /**
-   * A new personal best: submit it for verification (the server replays this session's inputs),
-   * or keep it until a nickname is chosen.
-   */
-  private queueSubmission(lap: number, time: number) {
-    if (this.trace.full) {
-      this.toast("Session too long to verify: restart the lap to post times", "info", 3);
-      return;
-    }
-    this.unsubmitted = { layout: this.store.get().layout, lap, time, trace: this.trace.encode() };
-    if (this.store.get().nickname) void this.submitPending();
-    else this.store.set({ pendingSubmit: true });
+  /** Opens a built-in circuit (from the circuits panel) and starts driving it. */
+  loadCircuit(track: TrackData) {
+    if (this.store.get().screen === "editor") this.editor?.disable();
+    this.store.set({ overlay: null });
+    this.resumeAfterOverlay = false;
+    this.importTrack(track);
+    this.toast(track.name, "info", 2);
   }
 
-  /** Sends the held personal best to the leaderboard. */
-  async submitPending() {
-    const lap = this.unsubmitted;
-    if (!lap) return;
-    this.unsubmitted = null;
-    this.store.set({ pendingSubmit: false, submission: { state: "submitting", time: lap.time } });
-    try {
-      const r = await submitLap(lap);
-      this.store.set({
-        submission: { state: "verified", time: r.time, rank: r.rank, improved: r.improved },
-      });
-      if (r.improved) this.toast(`Verified! Leaderboard rank #${r.rank}`, "success", 2.5);
-    } catch (e) {
-      const err = e instanceof ApiError ? e : new ApiError(0, String(e), "error");
-      const rejected = err.status === 422 || err.status === 409 || err.status === 400;
-      this.store.set({
-        submission: {
-          state: rejected ? "rejected" : "error",
-          time: lap.time,
-          message: err.message,
-        },
-      });
-      // Server unreachable or busy: keep it for a retry from the leaderboard panel.
-      if (!rejected && err.code !== "unknown_layout") {
-        this.unsubmitted = lap;
-        this.store.set({ pendingSubmit: true });
-      }
-    }
+  /** Best lap saved in this browser for a circuit (null: never lapped). */
+  bestLapOf(track: TrackData): number | null {
+    const id = trackId(track);
+    const record = readNumber(BEST_KEY + id);
+    const ghost = decodeGhost(read(GHOST_KEY + id))?.time ?? null;
+    // Same reconciliation as loadTrack: the ghost lap counts as a record.
+    return ghost !== null && (record === null || ghost < record) ? ghost : record;
   }
 
-  /** Chooses or changes the leaderboard nickname (submits a held personal best). */
-  async setPlayerNickname(nickname: string) {
-    const name = await setNickname(nickname);
-    this.store.set({ nickname: name });
-    if (this.unsubmitted) void this.submitPending();
-    return name;
-  }
-
-  /** Opens a published circuit (a given revision, else the latest) and starts driving it. */
-  async loadLibraryTrack(id: string, revision?: number) {
-    try {
-      const r = await getTrack(id, revision);
-      const parsed = fromJson(r.version.data);
-      if (!parsed.ok) throw new Error(parsed.error);
-      if (this.store.get().screen === "editor") this.editor?.disable();
-      this.loadTrack(parsed.track);
-      write(TRACK_KEY, toJson(parsed.track));
-      this.store.set({
-        overlay: null,
-        library: {
-          id: r.track.id,
-          revision: r.version.revision,
-          layout: r.version.layout,
-          name: r.track.name,
-          creator: r.track.creator,
-          official: r.track.official,
-          mine: r.track.mine,
-        },
-      });
-      this.drive();
-      this.toast(`${r.track.name}${r.track.creator ? ` by ${r.track.creator}` : ""}`, "info", 2.5);
-      void countPlay(id);
-    } catch (e) {
-      this.toast(`Could not open the circuit: ${(e as Error).message}`, "warning", 3);
-    }
-  }
-
-  /** Publishes the circuit being driven as a new library entry. */
-  async publishCurrent(name: string, description: string) {
-    const track = { ...this.track, name };
-    const r = await publishTrack(name, description, toJson(track));
-    this.store.set({
-      trackName: name,
-      library: {
-        id: r.id,
-        revision: r.revision,
-        layout: r.layout,
-        name,
-        creator: this.store.get().nickname,
-        official: false,
-        mine: true,
-      },
-    });
-    this.track = { ...this.track, name };
-    return r;
-  }
-
-  /** Publishes the circuit being driven as a new version of the player's library entry. */
-  async publishRevision(description?: string) {
-    const lib = this.store.get().library;
-    if (!lib?.mine) throw new Error("Not your circuit");
-    const r = await updateTrack(lib.id, {
-      name: this.track.name,
-      description,
-      track: toJson(this.track),
-    });
-    this.store.set({ library: { ...lib, revision: r.revision, layout: r.layout } });
-    return r;
+  /** Whether a circuit has the same layout as the one being driven. */
+  isCurrentTrack(track: TrackData): boolean {
+    return trackId(track) === trackId(this.track);
   }
 
   getTrackJson(): string {
@@ -1244,7 +1104,6 @@ export class Game {
 
   /** Import from the share dialog outside the editor: load it and start driving it. */
   importTrack(track: TrackData) {
-    this.store.set({ library: null });
     this.loadTrack(track);
     write(TRACK_KEY, toJson(track));
     this.drive();
@@ -1319,7 +1178,6 @@ export class Game {
           break;
         }
         case "lap": {
-          if (e.record) this.queueSubmission(e.lap, e.time);
           this.finishGhostLap(e.time);
           this.beginGhostLap();
           this.splitHold = SPLIT_HOLD;
@@ -1405,10 +1263,9 @@ export class Game {
   private fixedStep(dt: number) {
     const sim = this.sim;
     if (!sim) return;
-    // Quantized before use, so the recorded trace is exactly what the simulation ran on.
+    // Quantized before use, so a session stays deterministic (same inputs, same laps).
     const input = quantizeInput(this.input.read(), this.pendingReset);
     this.pendingReset = false;
-    this.trace.push(input);
     this.lastThrottle = input.throttle;
     this.lastBrake = input.brake;
 

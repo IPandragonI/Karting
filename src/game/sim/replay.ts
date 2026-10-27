@@ -3,8 +3,7 @@ import type { TrackData } from "../track/Track";
 import { canonicalTrack, Simulation, type SimInput } from "./Simulation";
 
 // Replays an input trace through the simulation from the start of a session, exactly as the
-// game ran it, and reports the laps it produces. Shared by the leaderboard server (which trusts
-// nothing but this) and the tests.
+// game ran it, and reports the laps it produces (used by the determinism tests).
 
 export type ReplayedLap = {
   lap: number;

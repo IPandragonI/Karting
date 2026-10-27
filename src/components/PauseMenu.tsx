@@ -1,6 +1,7 @@
 "use client";
 
 import { Flag, Keyboard, Pencil, Play, Settings, Share2 } from "lucide-react";
+import Image from "next/image";
 import { useState } from "react";
 import { LIVERIES } from "@/game/assets";
 import { CAMERA_MODES } from "@/game/Camera";
@@ -28,10 +29,15 @@ export function PauseMenu() {
         role="dialog"
         aria-label="Paused"
       >
-        <h2 className="text-xl font-extrabold">Paused</h2>
-        <p className="text-xs opacity-70">
-          {trackName} · Record <span className="tabular-nums">{formatTime(record)}</span>
-        </p>
+        <div className="flex items-center gap-3">
+          <Image src="/logo.png" alt="" width={44} height={44} className="rounded-xl" />
+          <div>
+            <h2 className="text-xl font-extrabold">Paused</h2>
+            <p className="text-xs opacity-70">
+              {trackName} · Record <span className="tabular-nums">{formatTime(record)}</span>
+            </p>
+          </div>
+        </div>
 
         <div className="mt-4 grid grid-cols-2 gap-2">
           <button className="btn col-span-2 btn-primary" onClick={() => game.resume()} autoFocus>

@@ -10,7 +10,7 @@ import {
 } from "./Track";
 
 // Wall colliders of a circuit, from the same centerlines the road is built from. Pure (no
-// three.js): the browser's renderer and physics and the server's lap replay build exactly the
+// three.js): the renderer, the physics and the simulation's replays build exactly the
 // same walls, in the same order.
 
 /** Deck edge of raised road: just outside the tire walls (where the verge ends). */

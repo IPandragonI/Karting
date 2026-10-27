@@ -33,8 +33,8 @@ export { canonicalTrack };
 // The driving simulation: kart model, physics world, ground following on raised road, race
 // progress (checkpoints, sectors, laps). Pure TypeScript, no rendering, no clock, no randomness:
 // the same circuit and the same per-step inputs always give the same laps, to the last bit. The
-// game runs it at a fixed 60 Hz in the browser; the leaderboard server replays a submitted input
-// trace through it to compute lap times itself instead of trusting the client's timer.
+// game runs it at a fixed 60 Hz in the browser, and the tests replay recorded input traces
+// through it.
 
 export const STEP = 1 / 60;
 /** Walls per static compound body (measured best for crashcat's broadphase, see Physics.ts). */

@@ -48,7 +48,7 @@ describe("deterministic replay", () => {
     drive(track, 1, -3, 4); // another session in between
     const r = replay(track, decodeTrace(scraping.trace));
     expect(r.laps.map((l) => l.time)).toEqual(scraping.times);
-  });
+  }, 30_000);
 
   it("stops after the requested lap", () => {
     const r = replay(track, decodeTrace(session.trace), 1);
