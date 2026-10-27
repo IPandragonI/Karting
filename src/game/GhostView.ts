@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { VEHICLE } from "./assets";
+import type { VehicleDef } from "./assets";
 
 // The best-lap ghost: the kart and a driver silhouette baked into one geometry and drawn as a
 // translucent, slightly glowing shell. A depth-only pre-pass hides the inner faces, so it reads
@@ -14,9 +14,9 @@ export class GhostView {
   private readonly geometry: THREE.BufferGeometry;
   private readonly materials: THREE.Material[];
 
-  constructor(model: THREE.Group) {
+  constructor(model: THREE.Group, vehicle: VehicleDef) {
     const kart = model.clone(true);
-    kart.scale.setScalar(VEHICLE.scale);
+    kart.scale.setScalar(vehicle.scale);
     kart.updateMatrixWorld(true);
     const parts: THREE.BufferGeometry[] = [];
     kart.traverse((o) => {
@@ -28,15 +28,18 @@ export class GhostView {
       if (hidden) return;
       parts.push(strip(mesh.geometry).applyMatrix4(mesh.matrixWorld));
     });
-    // Driver silhouette: shoulders and helmet in the cockpit, where KartView seats the driver.
-    const hy = VEHICLE.helmet.y * VEHICLE.scale;
-    const hz = VEHICLE.helmet.z * VEHICLE.scale;
-    const torso = new THREE.CapsuleGeometry(0.13, 0.16, 4, 8);
-    torso.rotateX(-0.25).translate(0, hy - 0.29, hz - 0.04);
-    const head = new THREE.SphereGeometry(0.14, 12, 8).translate(0, hy, hz);
-    parts.push(strip(torso), strip(head));
-    torso.dispose();
-    head.dispose();
+    // Driver silhouette in an open cockpit: shoulders and helmet. A vehicle with its own driver
+    // figure or a closed cabin needs none.
+    if (vehicle.helmet) {
+      const hy = vehicle.helmet.y * vehicle.scale;
+      const hz = vehicle.helmet.z * vehicle.scale;
+      const torso = new THREE.CapsuleGeometry(0.13, 0.16, 4, 8);
+      torso.rotateX(-0.25).translate(0, hy - 0.29, hz - 0.04);
+      const head = new THREE.SphereGeometry(0.14, 12, 8).translate(0, hy, hz);
+      parts.push(strip(torso), strip(head));
+      torso.dispose();
+      head.dispose();
+    }
     this.geometry = mergeGeometries(parts)!;
     for (const p of parts) p.dispose();
 

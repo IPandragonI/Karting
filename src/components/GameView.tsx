@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Game, type Overlay } from "@/game/Game";
 import { CircuitsDialog } from "./CircuitsDialog";
 import { EditorToolbar } from "./EditorToolbar";
+import { GarageDialog } from "./GarageDialog";
 import { GameContext } from "./useGame";
 import { Hud } from "./Hud";
 import { PerfOverlay } from "./PerfOverlay";
@@ -80,6 +81,7 @@ function OverlayPanels({ game, overlay }: { game: Game; overlay: Overlay | null 
     <>
       <SettingsDialog open={overlay === "settings"} onClose={close} />
       <CircuitsDialog open={overlay === "circuits"} onClose={close} />
+      <GarageDialog open={overlay === "garage"} onClose={close} />
     </>
   );
 }

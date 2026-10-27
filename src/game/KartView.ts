@@ -1,17 +1,11 @@
 import * as THREE from "three";
-import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
-import { VEHICLE } from "./assets";
+import type { VehicleDef } from "./assets";
 import type { KartState } from "./Vehicle";
 
-// Visual kart: the Car Kit single-seater (VEHICLE in assets.ts) animated from the arcade model's
-// state, with a small procedural driver in the livery colours seated in its cockpit. Wheels spin
-// with forward speed, front wheels steer (and counter-steer in a drift), the body rolls with
+// Visual kart: the selected Car Kit vehicle (VEHICLES in assets.ts) animated from the arcade
+// model's state. Wheels spin with forward speed, front wheels steer (and counter-steer in a drift), the body rolls with
 // lateral load and pitches under acceleration and braking, and the driver leans into corners.
 
-/** The driver is modelled in these units (metres = units × DRIVER_UNITS). */
-const DRIVER_UNITS = 1;
-/** Driver-model point at the centre of the helmet (see buildDriver). */
-const HELMET = { y: 0.79, z: -0.13 };
 /** Cockpit deck height in car-model units: the driver's lean pivots here. */
 const SEAT_Y = 0.49;
 
@@ -56,7 +50,6 @@ function liveryTexture(source: THREE.Texture | null, livery: string): THREE.Text
 export class KartView {
   readonly root = new THREE.Group();
   private readonly body = new THREE.Group();
-  private readonly driver: THREE.Group;
   private readonly wheels: THREE.Object3D[] = [];
   private readonly frontWheels: THREE.Object3D[] = [];
   private readonly rearLocal: THREE.Vector3[] = [];
@@ -70,23 +63,30 @@ export class KartView {
   private wheelRadius = 0.25;
   private readonly lean = new THREE.Group();
   private blob: THREE.Mesh;
+  /** The kit's driver figure, when the vehicle shows it (hidden in first person). */
+  private readonly character: THREE.Object3D[] = [];
   private readonly owned: {
     geometries: THREE.BufferGeometry[];
     materials: THREE.Material[];
     textures: THREE.Texture[];
   } = { geometries: [], materials: [], textures: [] };
 
-  constructor(model: THREE.Group, livery: string) {
+  constructor(
+    model: THREE.Group,
+    livery: string,
+    readonly vehicle: VehicleDef,
+  ) {
+    const scale = vehicle.scale;
     const kart = model.clone(true);
-    kart.scale.setScalar(VEHICLE.scale);
+    kart.scale.setScalar(scale);
     // One material for the whole car (the kit shares a palette texture), repainted per livery.
     let material: THREE.MeshStandardMaterial | null = null;
     kart.traverse((o) => {
       const name = o.name.toLowerCase();
       const mesh = o as THREE.Mesh;
       if (name === "character") {
-        o.visible = false;
-        return;
+        o.visible = vehicle.character;
+        this.character.push(o);
       }
       if (mesh.isMesh) {
         if (!material) {
@@ -101,15 +101,13 @@ export class KartView {
       o.rotation.order = "YXZ";
       this.wheels.push(o);
       // Wheel pivots sit at the axle: their height is the wheel radius.
-      this.wheelRadius = o.position.y * VEHICLE.scale;
+      this.wheelRadius = o.position.y * scale;
       if (name.includes("front")) this.frontWheels.push(o);
-      if (name.includes("back"))
-        this.rearLocal.push(o.position.clone().multiplyScalar(VEHICLE.scale));
+      if (name.includes("back")) this.rearLocal.push(o.position.clone().multiplyScalar(scale));
     });
     // The driver keeps its real size whatever the car's scale, helmet at the cockpit point; the
     // lean pivot sits at seat level so leaning tilts the shoulders, not the whole figure.
-    const k = DRIVER_UNITS / VEHICLE.scale;
-    this.lean.position.set(0, SEAT_Y, VEHICLE.helmet.z);
+    this.lean.position.set(0, SEAT_Y, vehicle.helmet?.z ?? 0);
     kart.add(this.lean);
     this.body.add(kart);
     this.root.add(this.body);
@@ -124,8 +122,10 @@ export class KartView {
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, 64, 64);
     const tex = new THREE.CanvasTexture(canvas);
+    // Sized to the vehicle (the truck is wider and longer than the single-seater).
+    const k = scale / 0.82;
     this.blob = new THREE.Mesh(
-      new THREE.PlaneGeometry(1.5, 2.2).rotateX(-Math.PI / 2),
+      new THREE.PlaneGeometry(1.5 * k, 2.2 * k).rotateX(-Math.PI / 2),
       new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false }),
     );
     this.blob.position.y = 0.035;
@@ -133,6 +133,18 @@ export class KartView {
     this.root.add(this.blob);
   }
 
+  /**
+   * First person: the kit's driver figure would fill the view, so it is hidden, and the
+   * (double-sided) bodywork is drawn front faces only, so from inside a closed cabin the roof and
+   * doors vanish while the bonnet ahead stays in view.
+   */
+  setFirstPerson(on: boolean) {
+    for (const c of this.character) c.visible = this.vehicle.character && !on;
+    for (const m of this.owned.materials) {
+      m.side = on ? THREE.FrontSide : THREE.DoubleSide;
+      m.needsUpdate = true;
+    }
+  }
 
   /** World positions of the rear wheel contact patches (for skid marks and smoke). */
   rearContacts(out: [THREE.Vector3, THREE.Vector3]) {

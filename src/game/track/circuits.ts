@@ -20,7 +20,7 @@ const circuit = (name: string, pieces: PieceData[]): TrackData => ({
   props: [],
 });
 
-export type CircuitKind = "original" | "historic";
+export type CircuitKind = "original" | "historic" | "venue";
 
 export type Circuit = {
   id: string;
@@ -275,6 +275,73 @@ function suzuka(): TrackData {
   ]);
 }
 
+// ─── Karting venues ─────────────────────────────────────────────────────────
+// Real indoor karting tracks, redrawn from their plans on the grid.
+
+/**
+ * "Valence Xtrem" (Valence, France): an indoor track on two levels. Down the pit straight, the wide
+ * left-hander and the kink along the south wall, then the long ramp up to the glass-walled deck:
+ * a sweeping left at its far end, a hairpin, the long middle section with a hairpin at each end
+ * (the west one next to the pit straight), and down the north ramp. Back on the ground the north
+ * serpentine (a U-turn, a hairpin under the deck's corner, the long back straight and its kinks)
+ * brings you round onto the pit straight.
+ */
+function valenceXtrem(): TrackData {
+  return circuit("Valence Xtrem", [
+    p("start", 0, 0, 0),
+    p("straight", 0, 1, 0),
+    p("straight", 0, 2, 0),
+    p("straight", 0, 3, 0),
+    p("straight", 0, 4, 0),
+    p("straight", 0, 5, 0),
+    p("straight", 0, 6, 0),
+    p("wideCorner", 0, 7, 0),
+    p("chicane", 2, 8, 1),
+    p("straight", 4, 7, 1),
+    p("longRamp", 5, 7, 1),
+    p("longRamp", 7, 7, 1, { y: 1 }),
+    p("wideCorner", 9, 7, 1, { y: 2 }),
+    p("straight", 10, 5, 2, { y: 2 }),
+    p("straight", 10, 4, 2, { y: 2 }),
+    p("straight", 10, 3, 2, { y: 2 }),
+    p("hairpin", 10, 2, 2, { y: 2 }),
+    p("straight", 9, 3, 0, { y: 2 }),
+    p("straight", 9, 4, 0, { y: 2 }),
+    p("corner", 9, 5, 0, { y: 2, flip: true }),
+    p("straight", 8, 5, 3, { y: 2 }),
+    p("straight", 7, 5, 3, { y: 2 }),
+    p("straight", 6, 5, 3, { y: 2 }),
+    p("straight", 5, 5, 3, { y: 2 }),
+    p("straight", 4, 5, 3, { y: 2 }),
+    p("straight", 3, 5, 3, { y: 2 }),
+    p("straight", 2, 5, 3, { y: 2 }),
+    p("hairpin", 1, 5, 3, { y: 2, flip: true }),
+    p("straight", 2, 4, 1, { y: 2 }),
+    p("straight", 3, 4, 1, { y: 2 }),
+    p("straight", 4, 4, 1, { y: 2 }),
+    p("straight", 5, 4, 1, { y: 2 }),
+    p("straight", 6, 4, 1, { y: 2 }),
+    p("straight", 7, 4, 1, { y: 2 }),
+    p("hairpin", 8, 4, 1, { y: 2 }),
+    p("longRamp", 6, 3, 1, { y: 1 }),
+    p("longRamp", 4, 3, 1),
+    p("straight", 3, 3, 3),
+    p("hairpin", 2, 3, 3, { flip: true }),
+    p("straight", 3, 2, 1),
+    p("straight", 4, 2, 1),
+    p("straight", 5, 2, 1),
+    p("straight", 6, 2, 1),
+    p("straight", 7, 2, 1),
+    p("hairpin", 8, 2, 1),
+    p("straight", 7, 1, 3),
+    p("straight", 6, 1, 3),
+    p("chicane", 5, 1, 3, { flip: true }),
+    p("chicane", 3, 0, 3, { flip: true }),
+    p("straight", 1, -1, 3),
+    p("corner", 0, -1, 3),
+  ]);
+}
+
 const def = (
   kind: CircuitKind,
   id: string,
@@ -332,9 +399,16 @@ export const CIRCUITS: readonly Circuit[] = [
     "The figure of eight: the Esses, Degner, the hairpin, Spoon and back over the bridge.",
     suzuka,
   ),
+  def(
+    "venue",
+    "xtrem",
+    "Indoor, on two levels: up the ramp onto the glass-walled deck, hairpins above and below.",
+    valenceXtrem,
+  ),
 ];
 
 export const CIRCUIT_KINDS: { kind: CircuitKind; label: string }[] = [
   { kind: "original", label: "Originals" },
   { kind: "historic", label: "Historic (simplified)" },
+  { kind: "venue", label: "Karting venues" },
 ];

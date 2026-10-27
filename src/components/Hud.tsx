@@ -13,6 +13,7 @@ import {
   Settings,
   Volume2,
   VolumeX,
+  Warehouse,
 } from "lucide-react";
 import { useEffect, useRef } from "react";
 import { CAMERA_MODES, type CameraMode } from "@/game/Camera";
@@ -334,6 +335,14 @@ function Controls() {
       >
         <RotateCcw className="size-4" />
       </button>
+      <button
+        className={btn}
+        onClick={() => game.openOverlay("garage")}
+        aria-label="Garage: choose your vehicle"
+        title="Garage"
+      >
+        <Warehouse className="size-4" />
+      </button>
     </nav>
   );
 }
@@ -349,15 +358,24 @@ export function Hud() {
   const screen = useGameState((s) => s.screen);
   const speedRef = useRef<HTMLSpanElement>(null);
   const offRef = useRef<HTMLDivElement>(null);
+  const gearRef = useRef<HTMLSpanElement>(null);
 
   useEffect(() => {
     let lastSpeed = -1;
     let lastOff: boolean | null = null;
+    let lastGear = "";
     return game.onFrame((f) => {
       const kmh = Math.round(f.speed * 3.6);
       if (kmh !== lastSpeed && speedRef.current) {
         speedRef.current.textContent = String(kmh);
         lastSpeed = kmh;
+      }
+      // Gearless engines (the kart) show no gear.
+      const gear = f.gears > 1 ? String(f.gear) : "";
+      if (gear !== lastGear && gearRef.current) {
+        gearRef.current.textContent = gear;
+        gearRef.current.hidden = gear === "";
+        lastGear = gear;
       }
       if (f.offTrack !== lastOff && offRef.current) {
         offRef.current.style.opacity = f.offTrack ? "1" : "0";
@@ -436,7 +454,7 @@ export function Hud() {
         )}
 
         {/* Speed: bottom centre, clear of the map and the touch pedals. */}
-        <div className="absolute bottom-0 left-1/2 -translate-x-1/2 text-center [@media(pointer:coarse)]:bottom-44 [@media(pointer:coarse)]:left-2 [@media(pointer:coarse)]:translate-x-0 [@media(pointer:coarse)_and_(orientation:landscape)]:top-[45%] [@media(pointer:coarse)_and_(orientation:landscape)]:bottom-auto">
+        <div className="absolute bottom-0 left-1/2 flex -translate-x-1/2 items-baseline text-center [@media(pointer:coarse)]:bottom-44 [@media(pointer:coarse)]:left-2 [@media(pointer:coarse)]:translate-x-0 [@media(pointer:coarse)_and_(orientation:landscape)]:top-[45%] [@media(pointer:coarse)_and_(orientation:landscape)]:bottom-auto">
           <span
             ref={speedRef}
             className="text-3xl leading-none font-extrabold tabular-nums sm:text-4xl"
@@ -444,6 +462,12 @@ export function Hud() {
             0
           </span>
           <span className="ml-1 text-xs font-bold opacity-80">km/h</span>
+          <span
+            ref={gearRef}
+            className="ml-2 rounded-md bg-black/45 px-1.5 text-lg leading-tight font-extrabold text-white tabular-nums"
+            aria-label="Gear"
+            hidden
+          />
         </div>
 
         <TouchControls />

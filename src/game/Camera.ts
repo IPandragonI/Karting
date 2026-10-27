@@ -1,6 +1,5 @@
 import * as THREE from "three";
 import { KART } from "./Vehicle";
-import { VEHICLE } from "./assets";
 
 // Camera rig with interchangeable follow modes, plus the editor and orbit views.
 //
@@ -38,6 +37,8 @@ export type FollowTarget = {
   slope: number;
   /** Underside of the lowest deck above the kart's level at a point (Infinity: open sky). */
   ceilingAt?: (x: number, z: number) => number;
+  /** First-person eye relative to the vehicle origin (metres, VehicleDef.eye). */
+  eye?: { y: number; z: number };
 };
 
 type FollowMode = {
@@ -66,6 +67,9 @@ type FollowMode = {
     look: THREE.Vector3,
   ) => void;
 };
+
+/** Eye of the default single-seater, for targets that give none. */
+const DEFAULT_EYE = { y: 0.74, z: 0.2 };
 
 const FOLLOW_MODES: Record<CameraMode, FollowMode> = {
   elevated: {
@@ -114,9 +118,10 @@ const FOLLOW_MODES: Record<CameraMode, FollowMode> = {
     place(t, yaw, _s, pos, look) {
       const fx = Math.sin(yaw);
       const fz = Math.cos(yaw);
-      // Eye point of the seated driver: at the visor, over the cockpit rim (VEHICLE.eye).
-      pos.set(t.x + fx * VEHICLE.eye.z, t.y + VEHICLE.eye.y, t.z + fz * VEHICLE.eye.z);
-      look.set(t.x + fx * 12, t.y + VEHICLE.eye.y - 0.55, t.z + fz * 12);
+      // Eye point of the seated driver: at the visor, over the cockpit rim (VehicleDef.eye).
+      const eye = t.eye ?? DEFAULT_EYE;
+      pos.set(t.x + fx * eye.z, t.y + eye.y, t.z + fz * eye.z);
+      look.set(t.x + fx * 12, t.y + eye.y - 0.55, t.z + fz * 12);
     },
   },
 };

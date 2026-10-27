@@ -1,5 +1,14 @@
 import * as THREE from "three";
-import { LIVERIES, loadModels, VEHICLE, type LiveryId, type Models } from "./assets";
+import {
+  DEFAULT_VEHICLE,
+  LIVERIES,
+  loadModels,
+  vehicleById,
+  VEHICLES,
+  type LiveryId,
+  type Models,
+  type VehicleId,
+} from "./assets";
 import { AudioManager, DEFAULT_VOLUME, type AudioState } from "./AudioManager";
 import {
   CAMERA_MODES,
@@ -35,6 +44,7 @@ import { canonicalTrack, Simulation, STEP } from "./sim/Simulation";
 import { quantizeInput } from "./sim/trace";
 import { RaceManager, type RaceEvent, type RacePhase, type SectorResult } from "./RaceManager";
 import {
+  Ambient,
   createForest,
   createGround,
   createSky,
@@ -102,6 +112,8 @@ export type UiState = {
   /** Whether the loaded track is a valid closed circuit (lap timing needs one). */
   raceable: boolean;
   livery: LiveryId;
+  /** Vehicle picked in the garage (looks, driving view and engine; same physics for all). */
+  vehicle: VehicleId;
   camera: CameraMode;
   muted: boolean;
   audio: AudioState;
@@ -160,16 +172,20 @@ export type FrameInfo = {
   /** Ghost position for the map (NaN when not shown). */
   ghostX: number;
   ghostZ: number;
+  /** Gear engaged (engine sound's gearbox) and how many there are (1: gearless). */
+  gear: number;
+  gears: number;
 };
 
 /** Panels opened over the game from the HUD (the game pauses underneath). */
-export type Overlay = "settings" | "circuits";
+export type Overlay = "settings" | "circuits" | "garage";
 
 // Fixed 60 Hz physics (STEP, from the simulation) with interpolated rendering. The kart model is
 // step-size independent, and a fixed step keeps a session deterministic (replayable).
 const MAX_STEPS = 5;
 const BEST_KEY = "karting:best:";
 const LIVERY_KEY = "karting:livery";
+const VEHICLE_KEY = "karting:vehicle";
 const CAMERA_KEY = "karting:camera";
 const QUALITY_KEY = "karting:quality";
 /** Auto quality falls back when frames average more than this (ms) for AUTO_SLOW_SECONDS. */
@@ -260,6 +276,7 @@ export class Game {
     trackName: "",
     raceable: true,
     livery: "kerb",
+    vehicle: DEFAULT_VEHICLE,
     camera: "elevated",
     muted: false,
     audio: "locked",
@@ -319,6 +336,8 @@ export class Game {
   private ground: THREE.Mesh | null = null;
   private groundKey = "";
   private forest: Forest | null = null;
+  /** Wind clock, drifting clouds and birds. */
+  private readonly ambient: Ambient;
   private trackside: Trackside | null = null;
   private props: THREE.Object3D[] = [];
   private propGeometry: THREE.BufferGeometry[] = [];
@@ -396,6 +415,8 @@ export class Game {
     level: 0,
     ghostX: NaN,
     ghostZ: NaN,
+    gear: 1,
+    gears: 1,
   };
   private readonly resizeObserver: ResizeObserver;
   private readonly lowPower: boolean;
@@ -435,7 +456,9 @@ export class Game {
     this.renderer.toneMappingExposure = 1.05;
 
     this.scene.fog = new THREE.Fog(PALETTE.fog, 160, 520);
-    this.scene.add(createSky(), this.skids.mesh, this.particles.points);
+    const sky = createSky();
+    this.ambient = new Ambient(this.scene, sky);
+    this.scene.add(sky, this.skids.mesh, this.particles.points);
     this.lighting = new Lighting(this.scene, this.lowPower);
     this.rig = new CameraRig(1);
 
@@ -458,11 +481,13 @@ export class Game {
     this.audio.onStateChange = (audio) => this.store.set({ audio });
 
     const livery = read(LIVERY_KEY);
+    const vehicle = read(VEHICLE_KEY);
     const camera = read(CAMERA_KEY);
     const quality = read(QUALITY_KEY);
     this.store.set({
       muted: this.audio.muted,
       livery: LIVERIES.some((l) => l.id === livery) ? (livery as LiveryId) : "kerb",
+      vehicle: VEHICLES.some((v) => v.id === vehicle) ? (vehicle as VehicleId) : DEFAULT_VEHICLE,
       camera: CAMERA_MODES.some((c) => c.id === camera) ? (camera as CameraMode) : "elevated",
       quality: quality === "high" || quality === "performance" ? quality : "auto",
       ghost: read(SHOW_GHOST_KEY) !== "0",
@@ -600,6 +625,7 @@ export class Game {
       window.removeEventListener(type, this.onFirstGesture, { capture: true });
     }
     this.audio.dispose();
+    this.ambient.dispose();
     this.resizeObserver.disconnect();
     this.clearTrack();
     this.dropGround();
@@ -670,7 +696,14 @@ export class Game {
     if (opts.scenery ?? true) {
       this.trackside = createTrackside(this.track, this.layout, this.path, this.models, terrain);
       this.scene.add(freeze(this.trackside.group));
-      this.forest = createForest(this.track, this.models, terrain, this.trackside.reserved);
+      this.forest = createForest(
+        this.track,
+        this.models,
+        terrain,
+        this.trackside.reserved,
+        this.ambient,
+        this.store.get().qualityActive === "performance",
+      );
       this.scene.add(freeze(this.forest.group));
     }
     this.skids.clear();
@@ -829,8 +862,13 @@ export class Game {
 
   private ensureKartView() {
     if (this.kartView || !this.models) return;
-    const livery = LIVERIES.find((l) => l.id === this.store.get().livery) ?? LIVERIES[0];
-    this.kartView = new KartView(this.models[VEHICLE.model], livery.color);
+    const s = this.store.get();
+    const livery = LIVERIES.find((l) => l.id === s.livery) ?? LIVERIES[0];
+    const vehicle = vehicleById(s.vehicle);
+    this.kartView = new KartView(this.models[vehicle.model], livery.color, vehicle);
+    this.kartView.setFirstPerson(s.camera === "first");
+    this.follow.eye = vehicle.eye;
+    this.audio.setEngine(vehicle.engine);
     this.scene.add(this.kartView.root);
     this.kartView.update(
       this.kart,
@@ -841,7 +879,7 @@ export class Game {
       0,
     );
     if (!this.ghostView) {
-      this.ghostView = new GhostView(this.models[VEHICLE.model]);
+      this.ghostView = new GhostView(this.models[vehicle.model], vehicle);
       this.scene.add(this.ghostView.root);
     }
   }
@@ -897,6 +935,32 @@ export class Game {
   setLivery(livery: LiveryId) {
     this.store.set({ livery });
     write(LIVERY_KEY, livery);
+    this.rebuildKartView();
+  }
+
+  /**
+   * Garage choice: swaps the vehicle model, the ghost's shell, the first-person eye and the engine.
+   * The physics (and so the session, the lap and its records) carry on untouched.
+   */
+  setVehicle(vehicle: VehicleId) {
+    if (vehicle === this.store.get().vehicle) return;
+    this.store.set({ vehicle });
+    write(VEHICLE_KEY, vehicle);
+    if (this.ghostView) {
+      this.scene.remove(this.ghostView.root);
+      this.ghostView.dispose();
+      this.ghostView = null;
+    }
+    this.rebuildKartView();
+    this.rig.cut();
+  }
+
+  /** Models are loaded (null while loading), for the garage preview. */
+  getModels(): Models | null {
+    return this.models;
+  }
+
+  private rebuildKartView() {
     if (this.kartView) {
       this.scene.remove(this.kartView.root);
       this.kartView.dispose();
@@ -908,6 +972,7 @@ export class Game {
   setCamera(camera: CameraMode) {
     this.store.set({ camera });
     write(CAMERA_KEY, camera);
+    this.kartView?.setFirstPerson(camera === "first");
     this.rig.cut();
   }
 
@@ -1370,6 +1435,7 @@ export class Game {
       this.kart.slip + (this.kart.drifting ? 0.45 : 0),
       braking,
       offTrack,
+      this.kart.accel / KART.engineAccel,
     );
 
     if (screen === "editor" && this.editor) {
@@ -1417,10 +1483,15 @@ export class Game {
     const ghostShown = this.ghostView?.root.visible ?? false;
     f.ghostX = ghostShown ? this.ghostPose.x : NaN;
     f.ghostZ = ghostShown ? this.ghostPose.z : NaN;
+    f.gear = this.audio.gear;
+    f.gears = this.audio.gears;
     for (const l of this.frameListeners) l(f);
 
     this.built?.updateLod(this.rig.camera.position);
-    this.renderer.render(this.scene, this.rig.camera);
+    const cam = this.rig.camera.position;
+    this.ambient.update(dt, cam.x, cam.z);
+    // The garage draws its own preview over a paused game: the last frame stays on the canvas.
+    if (this.store.get().overlay !== "garage") this.renderer.render(this.scene, this.rig.camera);
   }
 
   /** Ghost pose at the current lap time, interpolated between physics steps like the kart. */

@@ -3,9 +3,10 @@ import { toInstanceParts, type Models } from "./assets";
 import { CELL } from "./track/pieces";
 import { cellKey, footprintCells, trackBounds, type TrackData } from "./track/Track";
 
-// Static world dressing: light rig, sky with sun glow and clouds, rolling ground, and a forest with
-// bushes that fills the empty cells around the circuit. Everything repeated is instanced, so
-// hundreds of trees cost a few draw calls.
+// World dressing: light rig, sky with sun, drifting clouds and a few birds, rolling ground, and a
+// forest (broadleaf trees, pines, bushes, rocks, flower patches) that fills the empty cells around
+// the circuit. Everything repeated is instanced, so hundreds of trees cost a few draw calls, and
+// the only animation is in the vertex shader (wind sway, wing flaps) or a dozen matrices a frame.
 
 export const PALETTE = {
   skyTop: new THREE.Color("#2f7fd6"),
@@ -87,8 +88,137 @@ export function createSky(): THREE.Group {
   sky.renderOrder = -10;
   sky.frustumCulled = false;
   group.add(sky);
-  group.add(createClouds());
+  // Sun disc: a bright billboard far out along the sun direction (no fog, never culled).
+  const sun = new THREE.Mesh(
+    new THREE.CircleGeometry(26, 24),
+    new THREE.MeshBasicMaterial({ color: "#fff8e6", fog: false, depthWrite: false }),
+  );
+  sun.position.copy(SUN_DIR).multiplyScalar(860);
+  sun.lookAt(0, 0, 0);
+  sun.renderOrder = -9;
+  sun.frustumCulled = false;
+  group.add(sun);
+  const clouds = createClouds();
+  clouds.name = "clouds";
+  group.add(clouds);
   return group;
+}
+
+/**
+ * Ambient life: one clock for the wind (shared by every swaying material), slowly drifting
+ * clouds, and a few birds circling high over the part of the circuit the camera looks at.
+ */
+export class Ambient {
+  readonly time = { value: 0 };
+  private readonly clouds: THREE.Object3D | null;
+  private readonly birds: THREE.InstancedMesh;
+  private readonly flocks: { r: number; y: number; speed: number }[] = [
+    { r: 34, y: 42, speed: 0.16 },
+    { r: 52, y: 55, speed: -0.11 },
+  ];
+  private readonly matrix = new THREE.Matrix4();
+  private readonly quat = new THREE.Quaternion();
+  private readonly pos = new THREE.Vector3();
+  private readonly scale = new THREE.Vector3(1.4, 1.4, 1.4);
+  private readonly up = new THREE.Vector3(0, 1, 0);
+  private focusX = 0;
+  private focusZ = 0;
+
+  constructor(scene: THREE.Scene, sky: THREE.Group) {
+    this.clouds = sky.getObjectByName("clouds") ?? null;
+    // V-winged birds (two triangles); the wings flap in the vertex shader.
+    const wing = new THREE.BufferGeometry();
+    wing.setAttribute(
+      "position",
+      new THREE.Float32BufferAttribute(
+        [0, 0, 0.25, -0.7, 0.05, -0.15, 0, 0, -0.2, 0, 0, 0.25, 0, 0, -0.2, 0.7, 0.05, -0.15],
+        3,
+      ),
+    );
+    wing.computeVertexNormals();
+    const mat = new THREE.MeshLambertMaterial({ color: "#2b2f36", side: THREE.DoubleSide });
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = this.time;
+      shader.vertexShader = `uniform float uTime;\n${shader.vertexShader}`.replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+        #ifdef USE_INSTANCING
+          float phase = instanceMatrix[3].x * 0.37 + instanceMatrix[3].z * 0.21;
+          transformed.y += sin(uTime * 9.0 + phase) * abs(position.x) * 0.55;
+        #endif`,
+      );
+    };
+    mat.customProgramCacheKey = () => "bird-flap";
+    this.birds = new THREE.InstancedMesh(wing, mat, this.flocks.length * 6);
+    this.birds.frustumCulled = false;
+    this.birds.castShadow = false;
+    scene.add(this.birds);
+  }
+
+  /** Advances the wind clock and moves clouds and birds; `x`, `z`: where the camera looks. */
+  update(dt: number, x: number, z: number) {
+    this.time.value += dt;
+    if (this.clouds) this.clouds.rotation.y += dt * 0.003;
+    // The flocks drift after the camera's target, so they stay in view without following it.
+    const k = 1 - Math.exp(-0.15 * dt);
+    this.focusX += (x - this.focusX) * k;
+    this.focusZ += (z - this.focusZ) * k;
+    const t = this.time.value;
+    let i = 0;
+    this.flocks.forEach((flock, f) => {
+      const dir = Math.sign(flock.speed);
+      for (let b = 0; b < 6; b++, i++) {
+        // A loose V: each bird a little behind and outside the leader, bobbing on its own.
+        const rank = Math.ceil(b / 2);
+        const a = t * flock.speed + f * 2.1 - rank * 0.05 * dir;
+        const r = flock.r + (b % 2 ? 1 : -1) * rank * 1.8;
+        this.pos.set(
+          this.focusX + Math.cos(a) * r,
+          flock.y + Math.sin(t * 0.7 + b) * 0.8 + rank * 0.4,
+          this.focusZ + Math.sin(a) * r,
+        );
+        // Heading along the circle (its tangent), in the direction of travel.
+        this.quat.setFromAxisAngle(this.up, Math.atan2(-Math.sin(a) * dir, Math.cos(a) * dir));
+        this.birds.setMatrixAt(i, this.matrix.compose(this.pos, this.quat, this.scale));
+      }
+    });
+    this.birds.instanceMatrix.needsUpdate = true;
+  }
+
+  dispose() {
+    this.birds.geometry.dispose();
+    (this.birds.material as THREE.Material).dispose();
+    this.birds.dispose();
+  }
+}
+
+/**
+ * A copy of `source` whose vertices sway in the wind: displacement grows with the square of the
+ * height above the model's base (trunks stay put, crowns move), phase from the instance position
+ * so neighbours are out of step. Instanced meshes only. `amount` is in model units per unit².
+ */
+export function swaying(
+  source: THREE.Material,
+  amount: number,
+  time: { value: number },
+): THREE.Material {
+  const m = source.clone();
+  m.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = time;
+    shader.vertexShader = `uniform float uTime;\n${shader.vertexShader}`.replace(
+      "#include <begin_vertex>",
+      `#include <begin_vertex>
+      #ifdef USE_INSTANCING
+        float h = max(position.y, 0.0);
+        float ph = instanceMatrix[3].x * 0.11 + instanceMatrix[3].z * 0.07;
+        float gust = sin(uTime * 1.3 + ph) * 0.6 + sin(uTime * 2.3 + ph * 1.7) * 0.4;
+        transformed.x += gust * ${amount.toFixed(4)} * h * h;
+        transformed.z += gust * ${(amount * 0.6).toFixed(4)} * h * h;
+      #endif`,
+    );
+  };
+  m.customProgramCacheKey = () => `sway-${amount}`;
+  return m;
 }
 
 /** A few puffy low-poly clouds: merged icosahedrons, instanced. */
@@ -223,6 +353,7 @@ export function addInstances(
   list: Placement[],
   owned: { geometries: THREE.BufferGeometry[]; meshes: THREE.InstancedMesh[] },
   castShadow = true,
+  material?: (m: THREE.Material) => THREE.Material,
 ) {
   if (list.length === 0) return;
   const m = new THREE.Matrix4();
@@ -232,7 +363,8 @@ export function addInstances(
   const sc = new THREE.Vector3();
   for (const part of toInstanceParts(model)) {
     owned.geometries.push(part.geometry);
-    const mesh = new THREE.InstancedMesh(part.geometry, part.material, list.length);
+    const mat = material ? material(part.material) : part.material;
+    const mesh = new THREE.InstancedMesh(part.geometry, mat, list.length);
     list.forEach((p, i) => {
       q.setFromAxisAngle(up, p.rot);
       m.compose(v.set(p.x, p.y, p.z), q, sc.setScalar(p.scale));
@@ -275,6 +407,83 @@ function bush() {
   return bushGeometry;
 }
 
+/** Merges non-indexed copies of geometries, painting each in one vertex colour. */
+function paintedMerge(parts: [THREE.BufferGeometry, string][]): THREE.BufferGeometry {
+  const positions: number[] = [];
+  const colors: number[] = [];
+  const c = new THREE.Color();
+  for (const [g, color] of parts) {
+    const flat = g.index ? g.toNonIndexed() : g;
+    const arr = flat.getAttribute("position").array as Float32Array;
+    c.set(color);
+    for (let i = 0; i < arr.length; i += 3) {
+      positions.push(arr[i]!, arr[i + 1]!, arr[i + 2]!);
+      colors.push(c.r, c.g, c.b);
+    }
+    if (flat !== g) flat.dispose();
+    g.dispose();
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  out.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  out.computeVertexNormals();
+  return out;
+}
+
+let pineGeometry: THREE.BufferGeometry | null = null;
+/** Low-poly conifer, 1.6 units tall: a trunk and three stacked seven-sided cones. */
+function pine() {
+  pineGeometry ??= paintedMerge([
+    [new THREE.CylinderGeometry(0.05, 0.07, 0.35, 5).translate(0, 0.17, 0), "#7a5235"],
+    [new THREE.ConeGeometry(0.42, 0.65, 7).translate(0, 0.6, 0), "#2f6b3a"],
+    [new THREE.ConeGeometry(0.33, 0.55, 7).translate(0, 0.98, 0), "#3a7d43"],
+    [new THREE.ConeGeometry(0.22, 0.45, 7).translate(0, 1.36, 0), "#46904d"],
+  ]);
+  return pineGeometry;
+}
+
+let tuftGeometry: THREE.BufferGeometry | null = null;
+let blossomGeometry: THREE.BufferGeometry | null = null;
+/**
+ * A low flowering tuft, in two parts drawn from the same placements (8 triangles each, so
+ * hundreds stay cheap): the leafy cushion keeps its green, the white blossom on top takes the
+ * instance colour.
+ */
+function flower(): [THREE.BufferGeometry, THREE.BufferGeometry] {
+  tuftGeometry ??= paintedMerge([
+    [new THREE.OctahedronGeometry(0.13, 0).scale(1.2, 0.45, 1.2).translate(0, 0.05, 0), "#7fbf55"],
+  ]);
+  blossomGeometry ??= paintedMerge([
+    [new THREE.OctahedronGeometry(0.075, 0).scale(1, 0.6, 1).translate(0, 0.12, 0), "#ffffff"],
+  ]);
+  return [tuftGeometry, blossomGeometry];
+}
+
+let rockGeometry: THREE.BufferGeometry | null = null;
+/** A chunky, squashed boulder. */
+function rock() {
+  if (!rockGeometry) {
+    // Polyhedra come non-indexed: every face has its own vertices, so the jitter keeps it faceted.
+    const g = new THREE.DodecahedronGeometry(0.6, 0);
+    const pos = g.getAttribute("position");
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      const z = pos.getZ(i);
+      const j = 1 + (Math.sin(x * 17.1 + z * 31.7 + y * 7.3) * 0.5 + 0.5) * 0.18;
+      pos.setXYZ(i, x * j, Math.max(-0.1, y * 0.62 * j) + 0.1, z * j * 0.9);
+    }
+    g.computeVertexNormals();
+    rockGeometry = g;
+  }
+  return rockGeometry;
+}
+
+const FLOWER_TONES = ["#f6f3ea", "#f2c14e", "#e98bb4", "#9b7fd6", "#e5483b", "#ffd98a"].map(
+  (c) => new THREE.Color(c),
+);
+const ROCK_TONES = ["#8d9096", "#9fa2a6", "#7c7f85", "#a8a39a"].map((c) => new THREE.Color(c));
+
 /**
  * Trees, bushes and tents on empty cells around the circuit. Cells touching the track get sparse
  * dressing so the cameras keep a clear view; cells further out become forest climbing the hills.
@@ -285,6 +494,8 @@ export function createForest(
   models: Models,
   terrain: Terrain,
   reserved: Set<string>,
+  ambient: Ambient,
+  lowPower = false,
 ): Forest {
   const occupied = new Set<string>();
   for (const p of track.pieces) for (const [x, z] of footprintCells(p)) occupied.add(cellKey(x, z));
@@ -309,6 +520,7 @@ export function createForest(
   // mostly outside the shadow map anyway, and its shadow pass cost more than it showed).
   const near = emptySets();
   const far = emptySets();
+  const flowers: (Placement & { tone: number })[] = [];
 
   for (let cz = minZ; cz <= maxZ; cz++) {
     for (let cx = minX; cx <= maxX; cx++) {
@@ -320,6 +532,36 @@ export function createForest(
         const z = cz * CELL + (hash(cx, cz, 20 + i) - 0.5) * CELL * spread;
         return { x, z, y: terrain.height(x, z) };
       };
+      // Flower patches: small, low and off the road, they colour the verges without hiding it.
+      if (hash(cx, cz, 90) < (r === 1 ? 0.38 : r === 2 ? 0.3 : 0.1)) {
+        const n = (lowPower ? 4 : 7) + Math.floor(hash(cx, cz, 91) * (lowPower ? 3 : 6));
+        const px = cx * CELL + (hash(cx, cz, 92) - 0.5) * CELL * 0.5;
+        const pz = cz * CELL + (hash(cx, cz, 93) - 0.5) * CELL * 0.5;
+        const tone = Math.floor(hash(cx, cz, 94) * FLOWER_TONES.length);
+        for (let i = 0; i < n; i++) {
+          const a = hash(cx, cz, 100 + i) * Math.PI * 2;
+          const d = Math.sqrt(hash(cx, cz, 120 + i)) * 1.5;
+          const x = px + Math.cos(a) * d;
+          const z = pz + Math.sin(a) * d;
+          // Mostly one colour per patch, the odd different one.
+          const t = hash(cx, cz, 140 + i) < 0.8 ? tone : (tone + 1 + i) % FLOWER_TONES.length;
+          flowers.push({
+            x,
+            y: terrain.height(x, z),
+            z,
+            rot: a,
+            scale: 1.3 + hash(cx, cz, 160 + i) * 0.9,
+            tone: t,
+          });
+        }
+      }
+      if (r >= 2 && hash(cx, cz, 95) < 0.16) {
+        (r === 2 ? near : far).rocks.push({
+          ...at(7, 0.8),
+          rot: hash(cx, cz, 96) * 6.28,
+          scale: 0.6 + hash(cx, cz, 97) * 1.1,
+        });
+      }
       if (r === 1) {
         // Next to the track: an occasional tree, tent or a few bushes; never crowded.
         const roll = hash(cx, cz, 1);
@@ -356,7 +598,11 @@ export function createForest(
           rot: hash(cx, cz, 30 + i) * Math.PI * 2,
           scale: 3.4 + hash(cx, cz, 40 + i) * 2.4,
         };
-        (hash(cx, cz, 50 + i) < 0.55 ? sets.large : sets.small).push(p);
+        // Broadleaf trees, with pines for variety (more of them in the far forest).
+        const kind = hash(cx, cz, 50 + i);
+        const pines = r === 2 ? 0.2 : 0.38;
+        if (kind < pines) sets.pines.push(p);
+        else (kind < 0.55 + pines * 0.45 ? sets.large : sets.small).push(p);
       }
       if (hash(cx, cz, 80) < 0.5) {
         sets.bushes.push({
@@ -371,7 +617,55 @@ export function createForest(
   const group = new THREE.Group();
   group.name = "forest";
   const owned = { geometries: [] as THREE.BufferGeometry[], meshes: [] as THREE.InstancedMesh[] };
-  const bushMat = new THREE.MeshLambertMaterial({ color: "#ffffff", flatShading: true });
+  const time = ambient.time;
+  const bushMat = swaying(
+    new THREE.MeshLambertMaterial({ color: "#ffffff", flatShading: true }),
+    0.05,
+    time,
+  );
+  const pineMat = swaying(
+    new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }),
+    0.025,
+    time,
+  );
+  const rockMat = new THREE.MeshLambertMaterial({ color: "#ffffff", flatShading: true });
+  const flowerMat = swaying(new THREE.MeshLambertMaterial({ vertexColors: true }), 0.6, time);
+  // One swaying copy per kit material, shared by every tree using it.
+  const swayed = new Map<THREE.Material, THREE.Material>();
+  const treeSway = (m: THREE.Material) => {
+    let copy = swayed.get(m);
+    if (!copy) swayed.set(m, (copy = swaying(m, 0.028, time)));
+    return copy;
+  };
+  /** One InstancedMesh for a procedural geometry, tinted per instance when `tones` is given. */
+  const place = (
+    geometry: THREE.BufferGeometry,
+    material: THREE.Material,
+    list: (Placement & { tone?: number })[],
+    shadows: boolean,
+    tones?: THREE.Color[],
+  ) => {
+    if (list.length === 0) return;
+    const mesh = new THREE.InstancedMesh(geometry, material, list.length);
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const up = new THREE.Vector3(0, 1, 0);
+    const v = new THREE.Vector3();
+    const sc = new THREE.Vector3();
+    list.forEach((p, i) => {
+      q.setFromAxisAngle(up, p.rot);
+      mesh.setMatrixAt(i, m.compose(v.set(p.x, p.y, p.z), q, sc.setScalar(p.scale)));
+      if (tones) {
+        const k = p.tone ?? Math.floor(Math.abs(p.x * 7 + p.z * 13));
+        mesh.setColorAt(i, tones[k % tones.length]!);
+      }
+    });
+    mesh.castShadow = shadows;
+    mesh.receiveShadow = true;
+    mesh.computeBoundingSphere();
+    group.add(mesh);
+    owned.meshes.push(mesh);
+  };
   const tones = ["#4f8f36", "#5c9e3e", "#6aa947", "#4a8434"].map((c) => new THREE.Color(c));
   // Two batches: near dressing casting shadows, and the far forest without. Kept as whole
   // batches on purpose: on integrated GPUs draw calls, not triangles, are the bottleneck, and
@@ -381,9 +675,11 @@ export function createForest(
     [far, false],
   ];
   for (const [tile, shadows] of batches) {
-    addInstances(group, models.treeLarge, tile.large, owned, shadows);
-    addInstances(group, models.treeSmall, tile.small, owned, shadows);
+    addInstances(group, models.treeLarge, tile.large, owned, shadows, treeSway);
+    addInstances(group, models.treeSmall, tile.small, owned, shadows, treeSway);
     addInstances(group, models.tentClosed, tile.tents, owned, shadows);
+    place(pine(), pineMat, tile.pines, shadows);
+    place(rock(), rockMat, tile.rocks, shadows, ROCK_TONES);
     if (tile.bushes.length > 0) {
       const mesh = new THREE.InstancedMesh(bush(), bushMat, tile.bushes.length);
       const m = new THREE.Matrix4();
@@ -406,15 +702,27 @@ export function createForest(
     }
   }
 
+  // Flowers: no shadows (too small to show in the shadow map anyway).
+  const [tuft, blossom] = flower();
+  place(tuft, flowerMat, flowers, false);
+  place(blossom, flowerMat, flowers, false, FLOWER_TONES);
+
   return {
     group,
     dispose: () => {
       for (const g of owned.geometries) g.dispose();
       for (const i of owned.meshes) i.dispose();
-      bushMat.dispose();
+      for (const m of [bushMat, pineMat, rockMat, flowerMat, ...swayed.values()]) m.dispose();
     },
   };
 }
 
-type Sets = Record<"large" | "small" | "tents" | "bushes", Placement[]>;
-const emptySets = (): Sets => ({ large: [], small: [], tents: [], bushes: [] });
+type Sets = Record<"large" | "small" | "tents" | "bushes" | "pines" | "rocks", Placement[]>;
+const emptySets = (): Sets => ({
+  large: [],
+  small: [],
+  tents: [],
+  bushes: [],
+  pines: [],
+  rocks: [],
+});

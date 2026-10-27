@@ -54,15 +54,27 @@ shortcuts; best lap saved per circuit). An incomplete circuit is driven freely w
   (piece, rotation, level) starts fresh records; an unchanged layout keeps them.
 
 **HUD**: settings and tools top left (menu, editor, camera, ghost, sound, settings, circuits,
-reset), the timer top right (lap, time, live delta, best lap, S1–S3 bars), the map
+reset, garage), the timer top right (lap, time, live delta, best lap, S1–S3 bars), the map
 bottom right (your heading as an arrow, the ghost as a ring, raised road drawn over the road it
-crosses), speed at the bottom. Sound starts on the first key press or tap.
+crosses), speed and gear at the bottom. Sound starts on the first key press or tap.
+
+**Garage** (button next to reset): a turntable preview of each vehicle (drag to spin it), arrows or
+← / → to browse, Select to drive it. Formula (V10, seven gears), Go-kart (twin, no gearbox),
+Sports car (V8, six gears) and Truck (diesel, five gears), all Kenney Car Kit models. The choice
+changes the look, the first-person view, the ghost's shell and the engine sound, never the
+physics: every vehicle handles the same, so lap records stay comparable.
+
+**Engine sound**: synthesized in an AudioWorklet, no samples. Revs follow road speed through a
+sequential gearbox: upshifts cut the ignition for a moment (the revs drop to the next gear),
+downshifts blip the throttle, and lifting off at high revs crackles in the exhaust.
 
 **Circuits** (map button): pick one of the built-in circuits, with its layout and your best lap
 on it. Originals: Pinewood Park (the default), Harbour Oval (long straights and chicanes),
 Crossover (a figure of eight over a bridge), Snake Valley (three hairpins) and Summit Ring (two
 levels up and down). Historic, redrawn by hand on the grid (the order and character of the famous
 corners, not the exact geometry): Monaco, Spa-Francorchamps, Monza and Suzuka (with its bridge).
+Karting venues: Valence Xtrem, the two-level indoor track in Valence, redrawn from its plans (the
+ramp up to the glass-walled deck, its hairpins, and the north serpentine back on the ground).
 They are also offered as starting points in the editor's reset menu (`src/game/track/circuits.ts`).
 
 **Settings** (Menu → Settings, saved in the browser): field of view for the chase and
@@ -101,29 +113,30 @@ other frame. Add `?perf` to the URL (or press F3) for an FPS / frame-time / draw
 The simulation lives in `src/game` and has no React dependency. React components in
 `src/components` only render the HUD, menu and editor overlays around a single `<canvas>`.
 
-| Module                          | Role                                                                                                                                         |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Game.ts`                       | Lifecycle, the single animation loop, fixed 60 Hz physics steps with render interpolation, screens, graphics quality                         |
-| `Vehicle.ts`                    | Arcade kart model (pure): forward/lateral velocity split, saturating tire grip, speed-dependent steering, stable drift                       |
-| `Physics.ts`                    | crashcat world: ground, wall colliders, cones, kart sphere (translation only, heading owned by `Vehicle`)                                    |
-| `sim/Simulation.ts`             | The deterministic driving simulation (kart, physics, ground following, race progress), shared by the game and the tests                      |
-| `sim/trace.ts`, `sim/replay.ts` | Quantized input traces (run-length encoded) and their replay, for the determinism tests                                                      |
-| `Camera.ts`                     | Follow-mode registry (elevated, chase, first person) plus orbit and editor views                                                             |
-| `KartView.ts`                   | Kart chassis animation and the procedural driver                                                                                             |
-| `track/pieces.ts`               | Piece definitions: footprint, centerline (lines and arcs), connectors, rise (ramps)                                                          |
-| `track/Track.ts`                | Track data, circuit ordering and validation (incl. height steps), race path with heights, track queries (off-track, progress, ground height) |
-| `track/TrackBuilder.ts`         | Road, kerbs, instanced tire walls, retaining walls, start gantry and (sloped) wall colliders, all from the centerlines                       |
-| `track/editing.ts`              | Pure editing operations (place, level, mirror, auto level) and undo history                                                                  |
-| `track/TrackSerializer.ts`      | Versioned JSON and compact binary URL format, strict import validation                                                                       |
-| `TrackEditor.ts`                | Editor interaction (pointer/touch/keyboard), ghost preview, validation overlay                                                               |
-| `RaceManager.ts`                | Endless lap timing: out lap, checkpoints, anti-cheat rules, three sectors, records                                                           |
-| `Ghost.ts` / `GhostView.ts`     | Best-lap recording on a fixed time grid, synced playback, storage format / translucent ghost kart                                            |
-| `Effects.ts`                    | Skid-mark ring buffer and pooled smoke/dust particles                                                                                        |
-| `audio/engineDsp.ts`            | Two-stroke kart engine DSP (AudioWorklet) and the gearless clutch rpm model                                                                  |
-| `AudioManager.ts`               | Web Audio graph: engine, squeal, braking scrub, wind, rumble, impacts, chimes                                                                |
-| `InputManager.ts`               | Keyboard (remappable bindings, key capture), touch and gamepad input                                                                         |
-| `Scenery.ts`                    | Sun and sky light, sky with clouds, rolling terrain, instanced forest and bushes                                                             |
-| `Trackside.ts`                  | Grandstands, pits, billboards, fences, light posts, chevrons and flags from the layout                                                       |
+| Module                          | Role                                                                                                                                            |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Game.ts`                       | Lifecycle, the single animation loop, fixed 60 Hz physics steps with render interpolation, screens, graphics quality                            |
+| `Vehicle.ts`                    | Arcade kart model (pure): forward/lateral velocity split, saturating tire grip, speed-dependent steering, stable drift                          |
+| `Physics.ts`                    | crashcat world: ground, wall colliders, cones, kart sphere (translation only, heading owned by `Vehicle`)                                       |
+| `sim/Simulation.ts`             | The deterministic driving simulation (kart, physics, ground following, race progress), shared by the game and the tests                         |
+| `sim/trace.ts`, `sim/replay.ts` | Quantized input traces (run-length encoded) and their replay, for the determinism tests                                                         |
+| `Camera.ts`                     | Follow-mode registry (elevated, chase, first person) plus orbit and editor views                                                                |
+| `KartView.ts`                   | Kart chassis animation and the procedural driver                                                                                                |
+| `track/pieces.ts`               | Piece definitions: footprint, centerline (lines and arcs), connectors, rise (ramps)                                                             |
+| `track/Track.ts`                | Track data, circuit ordering and validation (incl. height steps), race path with heights, track queries (off-track, progress, ground height)    |
+| `track/TrackBuilder.ts`         | Road, kerbs, instanced tire walls, retaining walls, start gantry and (sloped) wall colliders, all from the centerlines                          |
+| `track/editing.ts`              | Pure editing operations (place, level, mirror, auto level) and undo history                                                                     |
+| `track/TrackSerializer.ts`      | Versioned JSON and compact binary URL format, strict import validation                                                                          |
+| `TrackEditor.ts`                | Editor interaction (pointer/touch/keyboard), ghost preview, validation overlay                                                                  |
+| `RaceManager.ts`                | Endless lap timing: out lap, checkpoints, anti-cheat rules, three sectors, records                                                              |
+| `Ghost.ts` / `GhostView.ts`     | Best-lap recording on a fixed time grid, synced playback, storage format / translucent ghost kart                                               |
+| `Effects.ts`                    | Skid-mark ring buffer and pooled smoke/dust particles                                                                                           |
+| `audio/engineDsp.ts`            | Engine DSP (AudioWorklet), the four engine profiles and the sequential gearbox model                                                            |
+| `AudioManager.ts`               | Web Audio graph: engine, gear clunks, squeal, braking scrub, wind, rumble, impacts, chimes                                                      |
+| `GaragePreview.ts`              | The garage's turntable: its own renderer, scene and camera, separate from the game                                                              |
+| `InputManager.ts`               | Keyboard (remappable bindings, key capture), touch and gamepad input                                                                            |
+| `Scenery.ts`                    | Sun and sky light, sky, drifting clouds and birds, rolling terrain, instanced forest (trees, pines, bushes, rocks, flowers) swaying in the wind |
+| `Trackside.ts`                  | Grandstands, pits, billboards, fences, light posts, chevrons and flags from the layout                                                          |
 
 Per-frame values (speed, lap clock, minimap dot) reach the HUD through `Game.onFrame` and are
 written straight to the DOM; React state only changes on events (laps, screens, editor actions).

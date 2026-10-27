@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import type { EngineId } from "./audio/engineDsp";
 
 // Models are CC0 assets from Kenney (see ASSETS.md), served from /public/models.
 
@@ -16,26 +17,97 @@ export const LIVERIES = [
 ] as const;
 export type LiveryId = (typeof LIVERIES)[number]["id"];
 
-/**
- * The player's car: Kenney Car Kit "race", a low-poly open-wheel single-seater (CC0, ASSETS.md).
- * Its forward axis is +Z like the physics heading and its base sits at y = 0. Physics never sees
- * this model: the collider is the kart sphere, so only the look changes.
- */
-export const VEHICLE = {
-  model: "race",
-  /** Model units → metres: 2.56 long → 2.1 m, close to the collider's footprint. */
-  scale: 0.82,
-  /** Helmet centre in model units: on the cockpit deck (y 0.49), in front of the roll hoop. */
-  helmet: { y: 0.63, z: 0.1 },
+export type VehicleDef = {
+  id: string;
+  label: string;
+  description: string;
+  model: ModelName;
+  /** Model units → metres. Every vehicle keeps roughly the collider's footprint. */
+  scale: number;
   /**
-   * First-person eye relative to the car origin (metres): at the visor, above the bodywork and in
-   * front of the roll hoop, so the camera never sits inside solid geometry.
+   * Helmet centre in model units, where the ghost's driver silhouette sits; null when the model
+   * brings its own driver or has a closed cabin.
    */
-  eye: { y: 0.74, z: 0.2 },
-} as const;
+  helmet: { y: number; z: number } | null;
+  /** The kit's own driver figure ("character" node) is shown (hidden in first person). */
+  character: boolean;
+  /**
+   * First-person eye relative to the car origin (metres): above the bodywork or under the cabin
+   * roof, so the camera never sits inside solid geometry.
+   */
+  eye: { y: number; z: number };
+  engine: EngineId;
+};
+
+/**
+ * The player's vehicles, all from Kenney's Car Kit (CC0, ASSETS.md). Their forward axis is +Z like
+ * the physics heading and their base sits at y = 0. Physics never sees these models: the
+ * collider is the same kart sphere for all of them, so the choice changes the look, the driving
+ * view and the engine, never the handling (lap records stay comparable).
+ */
+export const VEHICLES = [
+  {
+    id: "formula",
+    label: "Formula",
+    description: "Open-wheel single-seater with a howling V10 and a seven-speed paddle shift.",
+    model: "race",
+    // 2.56 long → 2.1 m.
+    scale: 0.82,
+    // On the cockpit deck (y 0.49), in front of the roll hoop.
+    helmet: { y: 0.63, z: 0.1 },
+    character: false,
+    eye: { y: 0.74, z: 0.2 },
+    engine: "f1",
+  },
+  {
+    id: "kart",
+    label: "Go-kart",
+    description: "The real thing: a twin-cylinder kart, no gearbox, revs locked to the road.",
+    model: "kart-oobi",
+    // 1.43 long → 1.9 m (the kit's kart is short and tall: its driver is part of the model).
+    scale: 1.3,
+    helmet: null,
+    character: true,
+    eye: { y: 1.17, z: 0.05 },
+    engine: "kart",
+  },
+  {
+    id: "sports",
+    label: "Sports car",
+    description: "Low coupé with a burbling cross-plane V8 and a six-speed gearbox.",
+    model: "sedan-sports",
+    scale: 0.82,
+    helmet: null,
+    character: false,
+    eye: { y: 0.72, z: 0.32 },
+    engine: "v8",
+  },
+  {
+    id: "truck",
+    label: "Truck",
+    description: "A pickup on the race track: six-cylinder diesel, five long gears.",
+    model: "truck",
+    // 2.95 long → 2.65 m: the biggest, still on the same collider.
+    scale: 0.9,
+    helmet: null,
+    character: false,
+    eye: { y: 1.02, z: 0.45 },
+    engine: "diesel",
+  },
+] as const satisfies readonly VehicleDef[];
+
+export type VehicleId = (typeof VEHICLES)[number]["id"];
+export const DEFAULT_VEHICLE: VehicleId = "formula";
+
+export function vehicleById(id: string): VehicleDef {
+  return VEHICLES.find((v) => v.id === id) ?? VEHICLES[0];
+}
 
 const MODELS = [
   "race",
+  "kart-oobi",
+  "sedan-sports",
+  "truck",
   "cone",
   "treeLarge",
   "treeSmall",
@@ -60,10 +132,13 @@ export type Models = Record<ModelName, THREE.Group>;
 
 const loader = new GLTFLoader();
 
+/** Vehicle models: left as authored (their wheel nodes define the pivots we animate). */
+const VEHICLE_MODELS = new Set<string>(VEHICLES.map((v) => v.model));
+
 /**
- * Loads every model once (about 0.6 MB in total). The Racing Kit models carry an odd root offset,
- * so props are re-centred: footprint centred on the origin, base at y = 0. The kart is left
- * untouched because its wheel nodes define the pivots we animate.
+ * Loads every model once (about 1.2 MB in total, the four vehicles being most of it). The Racing
+ * Kit models carry an odd root offset, so props are re-centred: footprint centred on the origin,
+ * base at y = 0.
  */
 export async function loadModels(
   onProgress?: (loaded: number, total: number) => void,
@@ -82,7 +157,7 @@ export async function loadModels(
             tuneMaterial(m as THREE.MeshStandardMaterial, name);
         }
       });
-      if (!name.startsWith("kart-")) recenter(root);
+      if (!VEHICLE_MODELS.has(name)) recenter(root);
       onProgress?.(++loaded, MODELS.length);
       return [name, root] as const;
     }),
@@ -103,7 +178,7 @@ function tuneMaterial(m: THREE.MeshStandardMaterial, model: string) {
   if (name === "glass") {
     m.roughness = 0.25;
     m.metalness = 0.1;
-  } else if (model.startsWith("kart-")) {
+  } else if (VEHICLE_MODELS.has(model)) {
     m.roughness = 0.55;
   } else if (name === "pylon" || name === "checkers" || name === "red") {
     m.roughness = 0.7;
